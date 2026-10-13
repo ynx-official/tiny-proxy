@@ -248,6 +248,13 @@ impl Updates {
     }
 }
 
+impl Drop for Updates {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.jobs.abort_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,11 +330,5 @@ mod tests {
         }
         assert!(found);
         store.close().await;
-    }
-}
-impl Drop for Updates {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.jobs.abort_all();
     }
 }

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from scripts.release_notes import ReleaseNotesError, generate_release_notes
@@ -63,6 +66,13 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertNotIn("验证结果", notes)
         self.assertNotIn("变更依据", notes)
         self.assertNotIn("返回版本总览", notes)
+
+    def test_cli_succeeds_when_the_host_console_defaults_to_cp1252(self) -> None:
+        environment = dict(os.environ, PYTHONIOENCODING="cp1252", PYTHONUTF8="0")
+        script = Path(__file__).with_name("release_notes.py").resolve()
+        result = subprocess.run([sys.executable, str(script), "--root", str(self.root), "--tag", "v1.2.3"], env=environment, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertIn("发布资料校验通过：v1.2.3", result.stdout.decode("utf-8"))
 
     def test_rejects_tag_that_does_not_match_cargo_version(self) -> None:
         with self.assertRaisesRegex(ReleaseNotesError, "与 Cargo.toml 版本 1.2.3 不一致"):

@@ -1,5 +1,4 @@
 use super::*;
-use sha2::Digest as _;
 
 #[test]
 fn asset_selection_matches_platform_version_and_installation_exactly() {

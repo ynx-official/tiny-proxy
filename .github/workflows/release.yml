@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -67,7 +71,8 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.name }}
+          shared-key: ${{ matrix.target }}
+          cache-on-failure: true
       - name: Export version from Cargo.toml
         shell: bash
         run: |
