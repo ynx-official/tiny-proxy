@@ -41,3 +41,7 @@ macOS 纯加密测试在 cargo test --locked --lib；真实钥匙串需可解锁
 | 正式/beta 标签 | 正式版四包+清单+说明；beta 为 prerelease、不为 latest；未 Approved/无日期/缺资料阻止发布。 |
 
 本机 Windows；macOS 原生界面、钥匙串、签名权限、最低系统基线与两平台真实更新往返未验证。Actions 未触发，未发布版本。
+
+## v1.0.0 发布验证追加
+
+发布期间的实际结果见 [v1.0.0](../upgrade/v1.0.0/README.md)。Python 工具回归包含 `scripts/test_macos_packaging.py` 的完整脚本 stdout 合约测试，只有原生 macOS 工具边界在该测试中隔离；真实 app/ZIP/PKG 仍由 macOS Actions 打包核验。临时测试钥匙串预置随机合成加密密钥，允许多个 Rust 测试可执行文件访问，避免无人值守权限提示；不访问本机生产钥匙串。

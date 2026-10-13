@@ -17,6 +17,65 @@ use tiny_proxy::{
 // Synthetic 1x1 PNG: never use a user's screenshot in test fixtures.
 const PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
 
+#[tokio::test]
+async fn large_unauthenticated_bodies_receive_401_for_fixed_and_chunked_uploads() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("app.db")).await.unwrap();
+    let service = Service::for_test(store.clone(), "127.0.0.1:9".parse().unwrap()).unwrap();
+    let mut gateway = Gateway::start("127.0.0.1:0".parse().unwrap(), store.clone(), service)
+        .await
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    for route in ["chat/completions", "responses"] {
+        for invalid_key in [false, true] {
+            for chunked in [false, true] {
+                let payload = vec![b' '; 4 * 1024 * 1024];
+                let mut request = client
+                    .post(format!("http://{}/v1/{route}", gateway.address))
+                    .header("content-type", "application/json");
+                if invalid_key {
+                    request = request.bearer_auth("not-a-valid-key");
+                }
+                let request = if chunked {
+                    request.body(reqwest::Body::wrap_stream(futures_util::stream::iter(
+                        payload
+                            .chunks(64 * 1024)
+                            .map(|part| Ok::<_, std::io::Error>(part.to_vec()))
+                            .collect::<Vec<_>>(),
+                    )))
+                } else {
+                    request.body(payload)
+                };
+                let response = request.send().await.expect(
+                    "authentication rejection must deliver an HTTP response instead of a TCP reset",
+                );
+                assert_eq!(
+                    response.status(),
+                    401,
+                    "route={route}, invalid_key={invalid_key}, chunked={chunked}"
+                );
+                let id = response.headers()["x-request-id"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(body["error"]["code"], "invalid_gateway_key");
+                let record = store.request_record(&id).await.unwrap().unwrap();
+                assert_eq!(record.http_status, Some(401));
+                assert_eq!(
+                    record.body_bytes, None,
+                    "rejected bodies are discarded without parsing or retention"
+                );
+            }
+        }
+    }
+    gateway.stop().await;
+    store.close().await;
+}
+
 fn request(chat: bool, content: Value) -> Value {
     if chat {
         json!({"model":"fixture","messages":[{"role":"user","content":content}]})

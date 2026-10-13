@@ -21,7 +21,7 @@ cd "$ROOT_DIR"
 PACKAGE_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
 VERSION="${VERSION:-v$PACKAGE_VERSION}"
 [[ "$VERSION" == "v$PACKAGE_VERSION" ]] || { echo "Tag and Cargo version differ" >&2; exit 1; }
-python3 scripts/release_notes.py --check-current
+python3 scripts/release_notes.py --check-current >&2
 if [[ "$SKIP_BUILD" == false ]]; then
   [[ -z "$BINARY" ]] || { echo "--binary requires --skip-build" >&2; exit 2; }
   cargo build --locked --release --target "$TARGET" --bin tiny-proxy >&2

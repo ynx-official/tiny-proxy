@@ -43,7 +43,7 @@ jobs:
           echo "skip_tests=$SKIP_TESTS" >> "$GITHUB_OUTPUT"
       - name: Test release tooling
         if: steps.metadata.outputs.skip_tests != 'true'
-        run: python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py
+        run: python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py scripts/test_macos_packaging.py
 
   build:
     needs: validate

@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/release_notes.py --check-current
-          python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py
+          python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py scripts/test_macos_packaging.py
       - name: Use a temporary keychain for macOS credential tests
         if: runner.os == 'macOS'
         shell: bash
@@ -55,7 +55,14 @@ jobs:
           security unlock-keychain -p "$TEST_PASSWORD" "$TEST_KEYCHAIN"
           security default-keychain -d user -s "$TEST_KEYCHAIN"
           security list-keychains -d user -s "$TEST_KEYCHAIN"
+          # Integration tests run in multiple separate Rust executables. Give
+          # only this disposable test keychain's synthetic encryption key an
+          # all-app ACL, avoiding unattended permission prompts between them.
+          TEST_DATA_KEY="$(openssl rand -hex 16)"
+          echo "::add-mask::$TEST_DATA_KEY"
+          security add-generic-password -A -s dev.tiny-proxy.credentials -a local-aes-256-gcm-v1 -w "$TEST_DATA_KEY" "$TEST_KEYCHAIN"
       - run: cargo +1.96.0 fmt --all -- --check
       - run: cargo +1.96.0 clippy --all-targets --locked -- -D warnings
       - run: cargo +1.96.0 test --all-targets --locked
+        timeout-minutes: 15
       - run: cargo +1.96.0 build --release --locked --target ${{ matrix.target }} --bin tiny-proxy

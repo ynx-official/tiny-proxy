@@ -233,6 +233,47 @@ fn parse_json(v: Result<Bytes, BytesRejection>, trace: &Trace) -> Result<Value, 
     trace.phase("validating");
     Ok(value)
 }
+/// Finish an ordinary rejected upload before releasing its HTTP/1 connection.
+/// Dropping a still-uploading body can reset the Windows socket before the
+/// client receives 401/415. Discard chunks without parsing or retaining them;
+/// bound both bytes and time so an unauthenticated slow sender cannot hold us.
+async fn early_rejection(request: Request, error: ApiError, stop: &CancellationToken) -> Response {
+    const MAX_DISCARD: u64 = 8 * 1024 * 1024;
+    let expect_continue = request.headers().contains_key("expect");
+    let oversized = request
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|size| size > MAX_DISCARD);
+    let drained = if expect_continue || oversized {
+        false
+    } else {
+        let mut stream = request.into_body().into_data_stream();
+        let discard = async {
+            let mut bytes = 0u64;
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else {
+                    return false;
+                };
+                bytes = bytes.saturating_add(chunk.len() as u64);
+                if bytes > MAX_DISCARD {
+                    return false;
+                }
+            }
+            true
+        };
+        tokio::select! { biased; _=stop.cancelled()=>false, result=tokio::time::timeout(Duration::from_secs(2),discard)=>result.unwrap_or(false) }
+    };
+    let mut response = error.into_response();
+    if !drained {
+        response
+            .headers_mut()
+            .insert("connection", HeaderValue::from_static("close"));
+    }
+    response
+}
+
 async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: Next) -> Response {
     let id = Uuid::new_v4().to_string();
     // Never retain query strings or arbitrary unknown paths: they can contain secrets.
@@ -272,20 +313,28 @@ async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: 
         let expected = s.address.to_string();
         let localhost = format!("localhost:{}", s.address.port());
         if host != expected && !(s.address.ip().is_loopback() && host == localhost) {
-            return ApiError::new(
-                400,
-                "invalid_host",
-                "Host must match the configured gateway address",
+            return early_rejection(
+                request,
+                ApiError::new(
+                    400,
+                    "invalid_host",
+                    "Host must match the configured gateway address",
+                ),
+                &s.stop,
             )
-            .into_response();
+            .await;
         }
         if request.headers().contains_key("origin") {
-            return ApiError::new(
-                403,
-                "browser_origin_denied",
-                "Browser origins are not enabled",
+            return early_rejection(
+                request,
+                ApiError::new(
+                    403,
+                    "browser_origin_denied",
+                    "Browser origins are not enabled",
+                ),
+                &s.stop,
             )
-            .into_response();
+            .await;
         }
         if s.stop.is_cancelled() {
             return cancelled().into_response();
@@ -298,30 +347,46 @@ async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: 
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .map(|(_, v)| v);
         if auth.next().is_some() {
-            return ApiError::new(
-                401,
-                "invalid_gateway_key",
-                "A single gateway Bearer key is required",
+            return early_rejection(
+                request,
+                ApiError::new(
+                    401,
+                    "invalid_gateway_key",
+                    "A single gateway Bearer key is required",
+                ),
+                &s.stop,
             )
-            .into_response();
+            .await;
         }
         let Some(value) = value else {
-            return ApiError::new(401, "invalid_gateway_key", "Gateway Bearer key is required")
-                .into_response();
+            return early_rejection(
+                request,
+                ApiError::new(401, "invalid_gateway_key", "Gateway Bearer key is required"),
+                &s.stop,
+            )
+            .await;
         };
         let key = match s.store.authenticate(value).await {
             Ok(KeyStatus::Valid(id)) => id,
             Ok(KeyStatus::Invalid) => {
-                return ApiError::new(401, "invalid_gateway_key", "Invalid gateway key")
-                    .into_response();
+                return early_rejection(
+                    request,
+                    ApiError::new(401, "invalid_gateway_key", "Invalid gateway key"),
+                    &s.stop,
+                )
+                .await;
             }
             Err(_) => {
-                return ApiError::new(
-                    503,
-                    "storage_unavailable",
-                    "Local credential store is unavailable",
+                return early_rejection(
+                    request,
+                    ApiError::new(
+                        503,
+                        "storage_unavailable",
+                        "Local credential store is unavailable",
+                    ),
+                    &s.stop,
                 )
-                .into_response();
+                .await;
             }
         };
         trace.update(|r| r.key_id = Some(key.clone()));
@@ -329,7 +394,12 @@ async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: 
         trace.update(|r| r.account_id = account);
         let token = s.keys.lock().unwrap().entry(key).or_default().clone();
         if token.is_cancelled() {
-            return ApiError::new(403, "key_revoked", "Gateway key was revoked").into_response();
+            return early_rejection(
+                request,
+                ApiError::new(403, "key_revoked", "Gateway key was revoked"),
+                &s.stop,
+            )
+            .await;
         }
         request.extensions_mut().insert(Key { cancel: token });
         request.extensions_mut().insert(trace.clone());
@@ -350,12 +420,16 @@ async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: 
             if !(media == "application/json"
                 || media.starts_with("application/") && media.ends_with("+json"))
             {
-                return ApiError::new(
-                    415,
-                    "invalid_request",
-                    "Content-Type must be application/json",
+                return early_rejection(
+                    request,
+                    ApiError::new(
+                        415,
+                        "invalid_request",
+                        "Content-Type must be application/json",
+                    ),
+                    &s.stop,
                 )
-                .into_response();
+                .await;
             }
         }
         next.run(request).await
@@ -728,4 +802,75 @@ pub async fn test_text_for(
         input_tokens: result["usage"]["prompt_tokens"].as_u64(),
         output_tokens: result["usage"]["completion_tokens"].as_u64(),
     })
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::{ApiError, early_rejection};
+    use axum::{
+        body::{Body, Bytes},
+        extract::Request,
+    };
+    use std::{convert::Infallible, time::Duration};
+    use tokio_util::sync::CancellationToken;
+
+    fn pending_body() -> Body {
+        Body::from_stream(futures_util::stream::pending::<Result<Bytes, Infallible>>())
+    }
+    #[tokio::test]
+    async fn oversized_rejected_upload_does_not_wait_for_untrusted_body() {
+        let request = Request::builder()
+            .header("content-length", 100 * 1024 * 1024)
+            .body(pending_body())
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            early_rejection(
+                request,
+                ApiError::new(401, "invalid_gateway_key", "missing key"),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.headers()["connection"], "close");
+    }
+    #[tokio::test]
+    async fn expect_continue_rejection_does_not_trigger_an_upload() {
+        let request = Request::builder()
+            .header("expect", "100-continue")
+            .body(pending_body())
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            early_rejection(
+                request,
+                ApiError::new(401, "invalid_gateway_key", "missing key"),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.headers()["connection"], "close");
+    }
+    #[tokio::test]
+    async fn gateway_shutdown_interrupts_rejected_body_cleanup() {
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let request = Request::new(pending_body());
+        let response = tokio::time::timeout(
+            Duration::from_millis(100),
+            early_rejection(
+                request,
+                ApiError::new(401, "invalid_gateway_key", "missing key"),
+                &stop,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.headers()["connection"], "close");
+    }
 }
