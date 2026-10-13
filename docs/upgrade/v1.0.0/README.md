@@ -57,7 +57,7 @@ Tiny Proxy 首个正式版本，为个人设备和 AI Agent 提供原生桌面 C
 
 2026-10-13 18:57:12（UTC+8）首版正式发布：[GitHub Release v1.0.0](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.0.0)。API 已确认非 Draft、非 prerelease，且为最新正式版。标签提交为 4360bb732925c179953ee59ab9aad58adf35e54d。
 
-标签 [发布流水线 38385905189](https://github.com/ynx-official/tiny-proxy/actions/runs/38385905189) 的资料、两平台编译、打包、上传、清单与正式发布全部成功。标签 [原生检查 38385905602](https://github.com/ynx-official/tiny-proxy/actions/runs/38385905602) 的格式、Clippy 和两平台完整测试均通过；其额外 release 构建还在收尾。
+标签 [发布流水线 38385905189](https://github.com/ynx-official/tiny-proxy/actions/runs/38385905189) 的资料、两平台编译、打包、上传、清单与正式发布全部成功。标签 [原生检查 38385905602](https://github.com/ynx-official/tiny-proxy/actions/runs/38385905602) 的两平台格式、Clippy、完整测试及 release 构建全部通过。Windows 共 147 项 Rust 测试、macOS 共 144 项，均 0 失败、0 跳过；另有 15 项 Python 发布工具测试通过。
 
 | 已执行验证 | 结果与证据 |
 |---|---|
