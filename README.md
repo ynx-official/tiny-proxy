@@ -31,7 +31,7 @@ Tiny Proxy 是供个人在不同设备和 Agent 中使用的原生桌面 Codex �
 
 🔒 **本地凭据保护** — OAuth 凭据与新网关密钥使用 Windows 用户级 DPAPI；外部客户端只持有网关密钥。
 
-🔄 **在线更新与双平台发版** — 已移植 ashell 的检查、校验、下载与安装重启流程；发布配置仅 Windows x64 和 macOS arm64，各有安装包与便携包。代码与工作流已加入，真实构建及升级待验证。
+🔄 **在线更新与双平台发版** — 已移植 ashell 的检查、校验、下载与安装重启流程；发布配置仅 Windows x64 和 macOS arm64，各有安装包与便携包。v1.0.0 已完成两平台原生构建与四包发布，实际安装升级仍待验。
 
 ## 🌻 为什么做 Tiny Proxy
 
@@ -146,7 +146,7 @@ OAuth Token 仅由本机用于固定 Codex 上游。外部客户端不能管理�
 ### 凭据与隐私
 
 - Codex 凭据与新网关密钥使用 Windows 用户级 DPAPI；网关密钥另存摘要用于鉴权。
-- macOS 已补齐钥匙串/AES-256-GCM 保护代码；钥匙串保存加密密钥，SQLite 只保存凭据密文，真实平台验证尚未执行。仅复制数据库不能跨平台或跨用户恢复凭据，见 [平台决定](docs/03-architecture/adr/0005-online-update-release.md)。
+- macOS 已补齐钥匙串/AES-256-GCM 保护代码；钥匙串保存加密密钥，SQLite 只保存凭据密文，macOS 原生 CI 的凭据、账号与续期回归已通过，原生界面首启和真实账号登录仍待验。仅复制数据库不能跨平台或跨用户恢复凭据，见 [平台决定](docs/03-architecture/adr/0005-online-update-release.md)。
 - 旧版只保存摘要的密钥仍有效，但无法还原明文。
 - 请求诊断只保存元数据，不保存提示词、代码、回答、图片、工具参数或认证信息。
 
@@ -171,11 +171,11 @@ OAuth Token 仅由本机用于固定 Codex 上游。外部客户端不能管理�
 
 ## 外观主题
 
-设置 → 外观主题提供“跟随电脑 / 白天模式 / 夜间模式”。默认跟随电脑的应用主题，手动选择会本地保存并在重启后恢复；跟随模式响应运行期间的系统外观变化。该功能已修改源码，尚未编译或进行桌面实机验证，当前旧程序不会自动更新。待验场景与命令见 [主题验证清单](docs/04-quality/theme-checklist.md)。
+设置 → 外观主题提供“跟随电脑 / 白天模式 / 夜间模式”。默认跟随电脑的应用主题，手动选择会本地保存并在重启后恢复；跟随模式响应运行期间的系统外观变化。首版两平台编译与主题回归测试已通过，桌面主题实机检查仍待验；下载新版后手动安装。待验场景与命令见 [主题验证清单](docs/04-quality/theme-checklist.md)。
 
 ## 🛠️ 开发与验证
 
-设置 → 在线更新，支持启动/定时/关闭自动检查、更新说明、下载进度与取消重试。只有手动确认才安装并重启。GitHub 手动工作流只上传产物，版本标签才发布 Release；详见 [构建与更新](docs/05-operations/build-and-package.md)、[发版流程](docs/06-delivery/release-process.md)和 [版本总览](docs/upgrade/README.md)。当前未构建或发布这些安装包。
+设置 → 在线更新，支持启动/定时/关闭自动检查、更新说明、下载进度与取消重试。只有手动确认才安装并重启。GitHub 手动工作流只上传产物，版本标签才发布 Release；详见 [构建与更新](docs/05-operations/build-and-package.md)、[发版流程](docs/06-delivery/release-process.md)和 [版本总览](docs/upgrade/README.md)。[v1.0.0 已正式发布，可直接下载](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.0.0)，包含 Windows x64 的安装 EXE/便携 ZIP 和 macOS arm64 的安装 PKG/便携 ZIP。清单与四包的 GitHub SHA-256 已核对一致，实际结果见 [首版验证记录](docs/upgrade/v1.0.0/README.md#验证结果)。
 
 技术栈：**Rust · GPUI · GPUI Kit · Tokio · Axum · SQLite**。采用单进程、单 Cargo package 内部分模块，UI 通过应用服务访问网络与存储。
 

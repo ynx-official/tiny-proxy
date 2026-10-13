@@ -1,9 +1,9 @@
 # Tiny Proxy v1.0.0
 
 > 发布日期：2026-10-13
-> 状态：Approved（首版预检通过，正式发布流水线待完成）
+> 状态：Approved（已发布）
 > 最后更新：2026-10-13
-> 关联文档：[使用与打包](../../05-operations/build-and-package.md)、[API 契约](../../03-architecture/api-contracts.md)、[验证记录](../../06-delivery/implementation-status.md)、[更新验收](../../04-quality/online-update-checklist.md)
+> 关联文档：[使用与打包](https://github.com/ynx-official/tiny-proxy/blob/v1.0.0/docs/05-operations/build-and-package.md)、[API 契约](https://github.com/ynx-official/tiny-proxy/blob/v1.0.0/docs/03-architecture/api-contracts.md)、[验证记录](https://github.com/ynx-official/tiny-proxy/blob/main/docs/upgrade/v1.0.0/README.md#验证结果)、[更新验收](https://github.com/ynx-official/tiny-proxy/blob/v1.0.0/docs/04-quality/online-update-checklist.md)
 
 ## 版本概述
 
@@ -55,7 +55,9 @@ Tiny Proxy 首个正式版本，为个人设备和 AI Agent 提供原生桌面 C
 
 ## 验证结果
 
-2026-10-13 首版预检已通过，正式发布流水线尚待完成：
+2026-10-13 18:57:12（UTC+8）首版正式发布：[GitHub Release v1.0.0](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.0.0)。API 已确认非 Draft、非 prerelease，且为最新正式版。标签提交为 4360bb732925c179953ee59ab9aad58adf35e54d。
+
+标签 [发布流水线 38385905189](https://github.com/ynx-official/tiny-proxy/actions/runs/38385905189) 的资料、两平台编译、打包、上传、清单与正式发布全部成功。标签 [原生检查 38385905602](https://github.com/ynx-official/tiny-proxy/actions/runs/38385905602) 的格式、Clippy 和两平台完整测试均通过；其额外 release 构建还在收尾。
 
 | 已执行验证 | 结果与证据 |
 |---|---|
@@ -63,7 +65,16 @@ Tiny Proxy 首个正式版本，为个人设备和 AI Agent 提供原生桌面 C
 | Rust 格式 / Clippy / 完整测试 | 提交 0b79543 在两平台的对应步骤全部通过，见 [原生检查 38384871793](https://github.com/ynx-official/tiny-proxy/actions/runs/38384871793)；包含更新、凭据、续期、密钥删除、主题、记录、取消及大请求真实 HTTP 回归。 |
 | release 编译与四包 | 提交 1df005e 的 Windows x64 EXE/ZIP、macOS arm64 PKG/ZIP 均成功并上传，见 [打包预检 38383610395](https://github.com/ynx-official/tiny-proxy/actions/runs/38383610395)。版本、原生架构、Windows ProductVersion、macOS 应用结构与签名检查通过。 |
 
-已核对 1df005e 到 0b79543 的生产代码、依赖、构建和打包脚本没有变化，仅修正回归测试的 Responses 原生字符串预期及更新文档。标签工作流将重新构建、打包、生成说明和清单；公开 Release 与四包摘要核对结果在完成后补记。
+已核对 1df005e 到 0b79543 的生产代码、依赖、构建和打包脚本没有变化，仅修正回归测试的 Responses 原生字符串预期及更新文档。标签工作流已重新构建、打包、生成说明和清单；发布流水线已完成，后续文档补记不移动标签或替换四个应用包。
+
+已下载并重新计算 release-notes.md 与 update-manifest.json 的大小及 SHA-256，并核对说明与 Release 正文相同、验证章节和本地导航已过滤。四个应用包的清单大小、URL、SHA-256 与 GitHub 上传后计算的 API 元数据逐一一致；不是四包的本地安装验证。
+
+| 应用包 | 字节数 | SHA-256 |
+|---|---:|---|
+| Windows x64 portable ZIP | 12,780,017 | `0265ec8293a87c3220835ae340dea49816869089b2624a3c22a77b6d2e0933ef` |
+| Windows x64 setup EXE | 10,094,485 | `468c2de366f9f4ef9c3a3c6c7472d7e9772adc43d4cc8962da593325d3ba0fbe` |
+| macOS arm64 portable ZIP | 13,352,221 | `a51ab217db73b05ab0461b120b7663d59a09df0f7291493e11ee5e865bef883c` |
+| macOS arm64 setup PKG | 13,352,705 | `c75b5ed455cea5f98c874b940262a98177ce3e4d98ad37e28490ec984c78ab33` |
 
 不停止或替换正在使用的程序。原生 UI、真实上游及实际更新安装没有在本轮运行，历史验证不能代替当前提交的回归结果。
 
@@ -79,6 +90,6 @@ Tiny Proxy 首个正式版本，为个人设备和 AI Agent 提供原生桌面 C
 
 ## 变更依据
 
-首个正式版本，无前置发布标签与 compare 区间。用户于 2026-10-13 明确要求发布 v1.0.0，本版包含现有 Codex 网关、请求诊断、主题、在线更新及双平台交付代码。0.1.0 仅为未发布的开发资料，保留以便追溯。目标标签 v1.0.0 将在发布预检成功后创建，不复用已公开标签。
+首个正式版本，无前置发布标签与 compare 区间。用户于 2026-10-13 明确要求发布 v1.0.0，本版包含现有 Codex 网关、请求诊断、主题、在线更新及双平台交付代码。0.1.0 仅为未发布的开发资料，保留以便追溯。v1.0.0 已在发布预检成功后创建并发布，固定指向上述提交。正式发布后更新本版文档的实际记录与公开说明，保留原标签及四个应用包。
 
 [返回版本总览](../README.md)
