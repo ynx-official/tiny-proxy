@@ -1,0 +1,1 @@
+ALTER TABLE app_settings ADD COLUMN gateway_bind TEXT NOT NULL DEFAULT '127.0.0.1:8787';
