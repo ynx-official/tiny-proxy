@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      skip_tests: ${{ steps.metadata.outputs.skip_tests }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Validate version, lockfile and release documents
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            python scripts/release_notes.py --tag "$GITHUB_REF_NAME"
+          else
+            python scripts/release_notes.py --check-current
+          fi
+          VERSION_TAG="v$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          SKIP_TESTS=false
+          if grep -Fxq '> 发布测试策略：skip' "docs/upgrade/$VERSION_TAG/README.md"; then SKIP_TESTS=true; fi
+          echo "skip_tests=$SKIP_TESTS" >> "$GITHUB_OUTPUT"
+      - name: Test release tooling
+        if: steps.metadata.outputs.skip_tests != 'true'
+        run: python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py
+
+  build:
+    needs: validate
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            name: macos-aarch64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.name }}
+      - name: Export version from Cargo.toml
+        shell: bash
+        run: |
+          echo "RELEASE_VERSION=v$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')" >> "$GITHUB_ENV"
+      - name: Build native release
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin tiny-proxy
+      - name: Ensure Inno Setup 6
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed" }
+          }
+      - name: Package Windows installer and portable ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Version $env:RELEASE_VERSION -Target '${{ matrix.target }}' -OutputDir dist -SkipBuild
+      - name: Package macOS installer and portable app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APP="$(bash scripts/package-macos-app.sh --version "$RELEASE_VERSION" --target '${{ matrix.target }}' --output-dir "$RUNNER_TEMP/tiny-proxy-app" --binary 'target/${{ matrix.target }}/release/tiny-proxy' --skip-build)"
+          BASE="tiny-proxy-$RELEASE_VERSION-macos-aarch64"
+          ditto -c -k --keepParent "$APP" "dist/$BASE-portable.zip"
+          STAGE="$(mktemp -d)"
+          ditto "$APP" "$STAGE/TinyProxy.app"
+          VERSION_CORE="${RELEASE_VERSION#v}"
+          VERSION_CORE="${VERSION_CORE%%-*}"
+          VERSION_CORE="${VERSION_CORE%%+*}"
+          pkgbuild --root "$STAGE" --identifier dev.tiny-proxy.app --version "$VERSION_CORE" --install-location /Applications "dist/$BASE-setup.pkg"
+          rm -rf "$STAGE"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate notes and verified update manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/release_notes.py --tag "$GITHUB_REF_NAME" --output dist/release-notes.md
+          python scripts/update_manifest.py --dist dist --tag "$GITHUB_REF_NAME" --repository "$GITHUB_REPOSITORY" --output dist/update-manifest.json
+      - name: Publish all four packages, notes and update manifest
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}

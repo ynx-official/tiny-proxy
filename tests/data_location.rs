@@ -17,6 +17,15 @@ fn explicit_location_still_wins() {
 }
 
 #[test]
+fn macos_home_uses_the_same_private_directory_name() {
+    assert_eq!(
+        resolve(None, Some(OsStr::new("/Users/test-user"))).unwrap(),
+        PathBuf::from("/Users/test-user/.tiny-proxy")
+    );
+    assert!(resolve(None, None).is_err());
+}
+
+#[test]
 fn finds_both_normal_and_packaged_legacy_locations() {
     let root = tempfile::tempdir().unwrap();
     let packaged = root

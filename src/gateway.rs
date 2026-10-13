@@ -9,7 +9,7 @@ use crate::{
 use axum::{
     Extension, Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Request, State, rejection::BytesRejection},
     http::{HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,10 +18,10 @@ use axum::{
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     sync::{Semaphore, mpsc},
@@ -30,27 +30,22 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[derive(Clone, Debug)]
-pub struct Record {
-    pub id: String,
-    pub route: String,
-    pub model: String,
-    pub outcome: String,
-    pub elapsed_ms: u128,
-}
+mod journal;
+pub use crate::storage::RequestRecord as Record;
+use journal::{FailureInfo, Guard, Journal, Trace, now_ms};
+#[derive(Clone)]
+struct Streaming;
 #[derive(Clone)]
 struct Key {
     cancel: CancellationToken,
 }
-#[derive(Clone)]
-struct RequestId(String);
 struct Shared {
     store: Store,
     service: Arc<Service>,
     stop: CancellationToken,
     slots: Arc<Semaphore>,
     keys: Mutex<HashMap<String, CancellationToken>>,
-    records: Mutex<VecDeque<Record>>,
+    journal: Arc<Journal>,
     address: SocketAddr,
 }
 pub struct Gateway {
@@ -92,6 +87,7 @@ impl Gateway {
         }
         let listener = tokio::net::TcpListener::bind(address).await?;
         let address = listener.local_addr()?;
+        let journal = Journal::new(store.clone());
         let shared = Arc::new(Shared {
             store,
             service,
@@ -99,7 +95,7 @@ impl Gateway {
             stop: CancellationToken::new(),
             slots: Arc::new(Semaphore::new(4)),
             keys: Mutex::new(HashMap::new()),
-            records: Mutex::new(VecDeque::new()),
+            journal,
         });
         let app = Router::new()
             .route("/v1/models", get(models))
@@ -111,7 +107,9 @@ impl Gateway {
             .method_not_allowed_fallback(|| async {
                 ApiError::new(405, "method_not_allowed", "Unsupported HTTP method").into_response()
             })
-            .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
+            // Explicitly disable Axum's default limit: removing this layer would
+            // still reject Bytes bodies larger than 2 MiB.
+            .layer(DefaultBodyLimit::disable())
             .layer(middleware::from_fn_with_state(shared.clone(), authenticate))
             .with_state(shared.clone());
         let stop = shared.stop.clone();
@@ -135,15 +133,11 @@ impl Gateway {
             .or_default()
             .cancel();
     }
-    pub fn records(&self) -> Vec<Record> {
-        self.shared
-            .records
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .cloned()
-            .collect()
+    pub fn live_records(&self) -> Vec<Record> {
+        self.shared.journal.live_records()
+    }
+    pub fn log_write_failures(&self) -> u64 {
+        self.shared.journal.write_failures()
     }
     pub async fn stop(&mut self) {
         self.shared.stop.cancel();
@@ -155,6 +149,7 @@ impl Gateway {
             task.abort();
             let _ = task.await;
         }
+        self.shared.journal.flush().await;
     }
 }
 impl Drop for Gateway {
@@ -185,7 +180,10 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.value())).into_response()
+        let info = FailureInfo::new(self.code, self.status.as_u16());
+        let mut response = (self.status, Json(self.value())).into_response();
+        response.extensions_mut().insert(info);
+        response
     }
 }
 impl From<codex::Error> for ApiError {
@@ -220,17 +218,50 @@ fn cancelled() -> ApiError {
 fn request_error(e: gateway::Error) -> ApiError {
     ApiError::new(400, "unsupported_or_invalid_parameter", e.to_string())
 }
-fn parse_json(v: Result<Json<Value>, JsonRejection>) -> Result<Value, ApiError> {
-    v.map(|v| v.0).map_err(|e| {
+fn parse_json(v: Result<Bytes, BytesRejection>, trace: &Trace) -> Result<Value, ApiError> {
+    let bytes = v.map_err(|e| {
         ApiError::new(
             e.status().as_u16(),
             "invalid_request",
-            "Request must be valid JSON within the 2 MiB limit",
+            "Request body could not be read",
         )
-    })
+    })?;
+    trace.update(|r| r.body_bytes = Some(bytes.len() as i64));
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::new(400, "invalid_request", "Request must be valid JSON"))?;
+    trace.metadata(&value, bytes.len());
+    trace.phase("validating");
+    Ok(value)
 }
 async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: Next) -> Response {
     let id = Uuid::new_v4().to_string();
+    // Never retain query strings or arbitrary unknown paths: they can contain secrets.
+    let route = match request.uri().path() {
+        "/v1/models" => "/v1/models",
+        "/v1/chat/completions" => "/v1/chat/completions",
+        "/v1/responses" => "/v1/responses",
+        _ => "unknown",
+    };
+    let method = match request.method().as_str() {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "DELETE" => "DELETE",
+        "PATCH" => "PATCH",
+        "OPTIONS" => "OPTIONS",
+        "HEAD" => "HEAD",
+        _ => "OTHER",
+    };
+    let trace = s
+        .journal
+        .begin(Record::new(
+            id.clone(),
+            method.into(),
+            route.into(),
+            now_ms(),
+        ))
+        .await;
+    let mut guard = Guard(trace.clone(), true);
     let result = async {
         // A literal listening address/localhost prevents browser DNS rebinding.
         let host = request
@@ -293,16 +324,52 @@ async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: 
                 .into_response();
             }
         };
+        trace.update(|r| r.key_id = Some(key.clone()));
+        let account = s.service.active_id().await.ok();
+        trace.update(|r| r.account_id = account);
         let token = s.keys.lock().unwrap().entry(key).or_default().clone();
         if token.is_cancelled() {
             return ApiError::new(403, "key_revoked", "Gateway key was revoked").into_response();
         }
         request.extensions_mut().insert(Key { cancel: token });
-        request.extensions_mut().insert(RequestId(id.clone()));
+        request.extensions_mut().insert(trace.clone());
+        trace.phase("reading_request");
+        if request.method() == axum::http::Method::POST
+            && matches!(route, "/v1/chat/completions" | "/v1/responses")
+        {
+            let media = request
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if !(media == "application/json"
+                || media.starts_with("application/") && media.ends_with("+json"))
+            {
+                return ApiError::new(
+                    415,
+                    "invalid_request",
+                    "Content-Type must be application/json",
+                )
+                .into_response();
+            }
+        }
         next.run(request).await
     }
     .await;
     let mut result = result;
+    trace.update(|r| r.http_status = Some(result.status().as_u16().into()));
+    if result.extensions().get::<Streaming>().is_some() {
+        guard.1 = false;
+    } else {
+        trace
+            .finish(result.extensions().get::<FailureInfo>().cloned())
+            .await;
+    }
     result
         .headers_mut()
         .insert("x-request-id", HeaderValue::from_str(&id).unwrap());
@@ -311,7 +378,12 @@ async fn authenticate(State(s): State<Arc<Shared>>, mut request: Request, next: 
         .insert("cache-control", HeaderValue::from_static("no-store"));
     result
 }
-async fn models(State(s): State<Arc<Shared>>, Extension(key): Extension<Key>) -> Response {
+async fn models(
+    State(s): State<Arc<Shared>>,
+    Extension(key): Extension<Key>,
+    Extension(trace): Extension<Trace>,
+) -> Response {
+    trace.phase("waiting_upstream");
     let Ok(_slot) = s.slots.clone().try_acquire_owned() else {
         return ApiError::new(
             429,
@@ -329,52 +401,33 @@ async fn models(State(s): State<Arc<Shared>>, Extension(key): Extension<Key>) ->
 async fn chat(
     State(s): State<Arc<Shared>>,
     Extension(key): Extension<Key>,
-    Extension(id): Extension<RequestId>,
-    body: Result<Json<Value>, JsonRejection>,
+    Extension(trace): Extension<Trace>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let request = parse_json(body).and_then(|v| gateway::normalize_chat(v).map_err(request_error));
+    let request =
+        parse_json(body, &trace).and_then(|v| gateway::normalize_chat(v).map_err(request_error));
     match request {
-        Ok(r) => generate(s, key, id, r, true).await,
+        Ok(r) => generate(s, key, trace, r, true).await,
         Err(e) => e.into_response(),
     }
 }
 async fn responses(
     State(s): State<Arc<Shared>>,
     Extension(key): Extension<Key>,
-    Extension(id): Extension<RequestId>,
-    body: Result<Json<Value>, JsonRejection>,
+    Extension(trace): Extension<Trace>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let request =
-        parse_json(body).and_then(|v| gateway::normalize_responses(v).map_err(request_error));
+    let request = parse_json(body, &trace)
+        .and_then(|v| gateway::normalize_responses(v).map_err(request_error));
     match request {
-        Ok(r) => generate(s, key, id, r, false).await,
+        Ok(r) => generate(s, key, trace, r, false).await,
         Err(e) => e.into_response(),
-    }
-}
-struct RecordGuard {
-    state: Arc<Shared>,
-    record: Record,
-    start: Instant,
-}
-impl RecordGuard {
-    fn outcome(&mut self, value: impl Into<String>) {
-        self.record.outcome = value.into();
-    }
-}
-impl Drop for RecordGuard {
-    fn drop(&mut self) {
-        self.record.elapsed_ms = self.start.elapsed().as_millis();
-        let mut records = self.state.records.lock().unwrap();
-        if records.len() == 100 {
-            records.pop_front();
-        }
-        records.push_back(self.record.clone());
     }
 }
 async fn generate(
     s: Arc<Shared>,
     key: Key,
-    id: RequestId,
+    trace: Trace,
     request: gateway::Request,
     chat: bool,
 ) -> Response {
@@ -394,7 +447,7 @@ async fn generate(
     {
         warnings.push("Assistant reasoning_content is not replayed to the Codex upstream");
     }
-    let mut response = generate_response(s, key, id, request, chat).await;
+    let mut response = generate_response(s, key, trace, request, chat).await;
     if !ignored.is_empty() {
         response.headers_mut().insert(
             "x-tiny-proxy-ignored-parameters",
@@ -410,7 +463,7 @@ async fn generate(
 async fn generate_response(
     s: Arc<Shared>,
     key: Key,
-    id: RequestId,
+    trace: Trace,
     request: gateway::Request,
     chat: bool,
 ) -> Response {
@@ -422,51 +475,42 @@ async fn generate_response(
         )
         .into_response();
     };
-    let mut record = RecordGuard {
-        state: s.clone(),
-        record: Record {
-            id: id.0,
-            route: if chat {
-                "chat/completions"
-            } else {
-                "responses"
-            }
-            .into(),
-            model: request.body["model"].as_str().unwrap_or("").into(),
-            outcome: "cancelled".into(),
-            elapsed_ms: 0,
-        },
-        start: Instant::now(),
-    };
+    trace.phase("waiting_upstream");
     let upstream = tokio::select! { biased; _=s.stop.cancelled()=>Err(cancelled()),_=key.cancel.cancelled()=>Err(cancelled()),r=s.service.open(&request.body)=>r.map_err(ApiError::from) };
     let response = match upstream {
         Ok(r) => r,
         Err(e) => {
-            record.record.outcome = e.code.into();
             return e.into_response();
         }
     };
+    trace.update(|r| r.upstream_status = Some(response.status().as_u16().into()));
+    trace.phase("receiving");
     if !request.stream {
-        let result = tokio::select! { biased; _=s.stop.cancelled()=>Err(cancelled()),_=key.cancel.cancelled()=>Err(cancelled()),r=consume(response,&request,None,chat)=>r };
+        let result = tokio::select! { biased; _=s.stop.cancelled()=>Err(cancelled()),_=key.cancel.cancelled()=>Err(cancelled()),r=consume(response,&request,None,chat,Some(&trace))=>r };
         return match result {
             Ok(result) => {
-                record.record.outcome = result["status"].as_str().unwrap_or("completed").into();
+                trace.result(&result);
                 Json(result).into_response()
             }
-            Err(e) => {
-                record.record.outcome = e.code.into();
-                e.into_response()
-            }
+            Err(e) => e.into_response(),
         };
     }
     let (sender, receiver) = mpsc::channel(4);
+    trace.update(|r| r.http_status = Some(200));
+    let guard = Guard(trace.clone(), true);
     let task = tokio::spawn(async move {
+        let _guard = guard;
         let _slot = slot;
-        let result = tokio::select! { biased; _=s.stop.cancelled()=>Err(cancelled()),_=key.cancel.cancelled()=>Err(cancelled()),r=consume(response,&request,Some(&sender),chat)=>r };
+        let result = tokio::select! { biased; _=s.stop.cancelled()=>Err(cancelled()),_=key.cancel.cancelled()=>Err(cancelled()),r=consume(response,&request,Some(&sender),chat,Some(&trace))=>r };
         match result {
-            Ok(result) => record.outcome(result["status"].as_str().unwrap_or("completed")),
+            Ok(result) => {
+                trace.result(&result);
+                trace.finish(None).await;
+            }
             Err(e) => {
-                record.outcome(e.code);
+                trace
+                    .finish(Some(FailureInfo::new(e.code, e.status.as_u16())))
+                    .await;
                 let data = if chat {
                     e.value()
                 } else {
@@ -483,14 +527,16 @@ async fn generate_response(
             .await
             .map(|bytes| (Ok::<Bytes, std::convert::Infallible>(bytes), r))
     });
-    (
+    let mut response = (
         [
             ("content-type", "text/event-stream"),
             ("x-accel-buffering", "no"),
         ],
         Body::from_stream(stream),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(Streaming);
+    response
 }
 struct BodyReceiver {
     receiver: mpsc::Receiver<Bytes>,
@@ -522,6 +568,7 @@ async fn consume(
     request: &gateway::Request,
     sender: Option<&mpsc::Sender<Bytes>>,
     chat: bool,
+    trace: Option<&Trace>,
 ) -> Result<Value, ApiError> {
     let mut stream = response.bytes_stream();
     let mut decoder = Decoder::new(1024 * 1024);
@@ -537,7 +584,20 @@ async fn consume(
             .await
             .map_err(|_| ApiError::new(504, "upstream_timeout", "Upstream stream idle timeout"))?;
         let Some(chunk) = chunk else { break };
-        let chunk = chunk.map_err(|_| interrupted())?;
+        let chunk = chunk.map_err(|e| {
+            if e.is_timeout() {
+                ApiError::new(
+                    504,
+                    "upstream_timeout",
+                    "Upstream request deadline exceeded",
+                )
+            } else {
+                interrupted()
+            }
+        })?;
+        if let Some(trace) = trace {
+            trace.activity(false);
+        }
         total += chunk.len();
         if total > 16 * 1024 * 1024 {
             return Err(ApiError::new(
@@ -561,7 +621,26 @@ async fn consume(
             if event.event != "message" && Some(event.event.as_str()) != value["type"].as_str() {
                 return Err(interrupted());
             }
+            if matches!(value["type"].as_str(), Some("error" | "response.failed")) {
+                return Err(ApiError::new(
+                    502,
+                    "upstream_failed",
+                    "Upstream returned a failed response",
+                ));
+            }
             let chunks = projection.accept(&value).map_err(|_| interrupted())?;
+            if let Some(trace) = trace {
+                let kind = value["type"].as_str().unwrap_or("");
+                let output = matches!(
+                    kind,
+                    "response.output_text.delta"
+                        | "response.function_call_arguments.delta"
+                        | "response.refusal.delta"
+                ) && value["delta"].as_str().is_some_and(|s| !s.is_empty());
+                if output {
+                    trace.activity(true);
+                }
+            }
             if let Some(sender) = sender {
                 let frames = if chat {
                     chunks.iter().map(|v| encode(v, true)).collect::<Vec<_>>()
@@ -572,13 +651,28 @@ async fn consume(
                     terminal_frames.extend(frames);
                 } else {
                     for frame in frames {
+                        if let Some(trace) = trace {
+                            trace.phase("sending");
+                        }
                         send(sender, frame).await?;
+                        if let Some(trace) = trace {
+                            trace.phase("receiving");
+                        }
                     }
                 }
             }
         }
+        // A validated terminal is authoritative. Waiting for transport EOF here
+        // keeps successful generations alive on persistent upstream connections.
+        if projection.terminal().is_some() {
+            break;
+        }
     }
-    decoder.finish().map_err(|_| interrupted())?;
+    // The optional trailing [DONE] can be split across network chunks. A validated
+    // response terminal already ends the request; do not wait for that suffix.
+    if projection.terminal().is_none() {
+        decoder.finish().map_err(|_| interrupted())?;
+    }
     let result = if chat {
         projection.finish().map_err(|_| interrupted())?
     } else {
@@ -586,6 +680,9 @@ async fn consume(
     };
     if let Some(sender) = sender {
         for frame in terminal_frames {
+            if let Some(trace) = trace {
+                trace.phase("sending");
+            }
             send(sender, frame).await?;
         }
         if chat {
@@ -617,7 +714,7 @@ pub async fn test_text_for(
         .open_for(account, &request.body)
         .await
         .map_err(|e| e.to_string())?;
-    let result = consume(response, &request, None, true)
+    let result = consume(response, &request, None, true, None)
         .await
         .map_err(|e| e.message)?;
     if result["choices"][0]["finish_reason"] != "stop" {

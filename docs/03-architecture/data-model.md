@@ -21,9 +21,15 @@ SQLite 当前默认路径为 %USERPROFILE%/.tiny-proxy/app.db，不放项目目�
 | model_catalog | registration_id、model_id、display_name、capability_json、verified_at、fetched_at | 复合主键；按注册隔离；“支持”与“实测”分开 |
 | request_records | request_id、key_id、registration_id、model_id、protocol、started_at、duration_ms、ttft_ms、result、error_code、token_counts、upstream_request_id | 仅元数据；usage 不明为 NULL；按日期/数量清理 |
 
-上表为目标模型。当前首个迁移已实现 app_settings、account_registrations、credential_bundles、client_keys 的基础字段，model_catalog、request_records 和完整设置尚未实现。真实临时 SQLite 文件测试验证空库迁移、主机标识重启稳定、密钥撤销、身份绑定和凭据代次冲突；升级恢复与完整迁移策略仍待验收。时间统一 UTC，UI 转为本地时区。
+上表为目标模型。首个迁移已实现 app_settings、account_registrations、credential_bundles、client_keys 的基础字段；模型目录由 0003 按账号保存。0006 增加请求与异常表，实际字段及最终验证边界见下文；完整设置仍未实现。时间统一 UTC，UI 转为本地时区。
 
 网关鉴权 digest 针对高熵随机秘密；不用于人类密码。密钥格式建议“非秘密 ID + 随机秘密”，先定位记录再比较秘密摘要；避免遍历所有密钥。
+
+## 0008 外观主题偏好
+
+迁移 0008 在 app_settings 增加 theme_preference，非空 TEXT，默认 system，CHECK 只允许 system/light/dark；现有行自动使用跟随电脑，不更新旧迁移。实际界面颜色由 GPUI 根据偏好及系统外观解析，解析结果不落库。
+
+UI 通过 SetThemePreference 命令交给后台保存，成功提交后以专用结果事件更新界面；保存失败不发成功事件，不影响登录任务状态。启动快照携带已保存偏好。读取异常必须报错，不把损坏值静默视为默认值；更新行缺失也不能报告保存成功。升级/重启测试见 [主题验证清单](../04-quality/theme-checklist.md)。
 
 ## 凭据保护
 
@@ -39,7 +45,7 @@ Token bundle 包含 access/refresh/retained ID Token、有效期、权限信息�
 - 刷新：CAS generation + 单注册互斥；新密文与版本一次提交。提交前不把新 Token 广播给请求。
 - 撤销密钥：单条 DELETE 提交后再取消该 key 的在途请求；失败保留记录。每次鉴权读取记录，删除后的旧值返回 Invalid；UI 使用提交后的快照移除行和对应明文预览。
 - 切换账号：活动注册与配置版本事务更新；在途请求不读取新的活动指针。
-- 记录写入：完成/失败时写一次；不逐 token 落库，失败时允许告警并计数丢失，不影响已完成的响应。
+- 记录写入：0006 起请求开始即建档，运行中每秒检查点，结束结果和异常一次事务提交；不逐 token 落库。写入失败告警并计数，不伪造完成；具体边界见 [请求诊断](../05-operations/request-diagnostics.md)。
 
 ## 迁移、备份、清理
 
@@ -54,7 +60,7 @@ P1 覆盖空库、旧版本升级、迁移失败回滚和不支持降级。迁�
 
 codex_session 是单行活动 Codex 会话：singleton_id=1、encrypted_blob、generation、expires_at、updated_at。bundle 字段和续期规则以当前认证文档为准。
 
-0001 中的 SIWC 表保留，0002 不改写原凭据；通过迁移隔离测试。0003_desktop_state 增加 codex_accounts、model_tests、活动账号指针与密钥密文；模型目录、显式测试、额度按账号持久化。0004_gateway_bind 增加监听地址持久化，最近 100 条普通请求元数据仍只在监听会话内存中保存。完整设置及持久化请求日志仍是后续目标。
+0001 中的 SIWC 表保留，0002 不改写原凭据；通过迁移隔离测试。0003_desktop_state 增加 codex_accounts、model_tests、活动账号指针与密钥密文；模型目录、显式测试、额度按账号持久化。0004_gateway_bind 增加监听地址持久化。请求日志原先只有监听会话内存记录，0006 已增加持久化代码，最终运行验证待执行；完整设置仍是后续目标。
 
 
 ## 0003 当前本地状态
@@ -74,3 +80,19 @@ codex_session 是单行活动 Codex 会话：singleton_id=1、encrypted_blob、g
 ## 0005 已撤销密钥清理
 
 2026-10-13 用户明确要求撤销后删除、不再展示，依据 [B20](../01-requirements/business-rules.md)。0005_delete_revoked_keys 仅删除 `revoked_at IS NOT NULL` 的历史记录，摘要和 DPAPI 密文随行移除。保留原列及已有迁移校验值，有效旧摘要密钥不受影响。新撤销不再写 revoked_at；列表、鉴权和密钥读取仍排除旧撤销状态，避免重新使用历史无效记录。删除范围为当前数据库记录，历史页和备份的边界沿用上文清理规则。
+
+## 0006 请求元数据与独立异常
+
+批准范围及时间/保留语义见 [请求诊断](../05-operations/request-diagnostics.md)。迁移只增加两个表与时间索引，不修改旧迁移，不包含正文列，也不迁移真实数据目录。
+
+- request_records：id、method、route、model、key_id、account_id、stream、body_bytes、message_count、tool_count、outcome、phase、http_status、upstream_status、started_at、ended_at、elapsed_ms、first_byte_at、first_output_at、last_activity_at、input_tokens、output_tokens。
+- failure_records：request_id、occurred_at、phase、code、message、http_status；request_id 唯一外键，清理请求时级联删除异常。message 仅为网关固定安全文案。
+- 所有请求时间用 UTC 毫秒；不改变其他表原有 UTC 秒字段。运行中 ended_at 为 NULL。正常耗时使用 Instant；中断恢复保留最近检查点耗时，ended_at 是恢复确认时间。
+- key_id/account_id 是历史关联值，不向账号和 Key 表建立级联外键；删除 Key 不删除请求历史。元数据为普通 SQLite 字段，不是 DPAPI 或全库加密。
+- 结束结果与异常同事务，检查点/重复结束仅更新 ended_at IS NULL 的记录，不能覆盖终态；持久化失败计数并提示。
+
+最终代码验证状态与未运行事项见 [验证记录](../06-delivery/implementation-status.md) 和 [测试清单](../04-quality/request-records-checklist.md)。
+
+## 0007 在线更新偏好
+
+用户于 2026-10-13 批准移植 ashell 更新设置。迁移 0007 新增单行 update_preferences：check_mode（startup/interval/disabled）、interval_hours（1–8760，默认24）、notify（默认1）、last_checked_at（默认0，仅成功检查后更新）。不存安装包、凭据或远端管理接口。迁移与持久化回归代码已加入，未执行。macOS 凭据密文封装及钥匙串边界见 [ADR 0005](adr/0005-online-update-release.md)。

@@ -1,41 +1,187 @@
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, px, rgb};
+use gpui_kit::{App, WindowAppearance, px, rgb};
+use tiny_proxy::app::appearance::ThemePreference;
 
-pub const CANVAS: u32 = 0x000000;
-pub const SURFACE: u32 = 0x15181e;
-pub const BORDER: u32 = 0x3b3d45;
-pub const INK: u32 = 0xffffff;
-pub const MUTED: u32 = 0xb2b6bd;
-pub const WARNING: u32 = 0xffcf25;
-pub const ERROR: u32 = 0xf24c53;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub canvas: u32,
+    pub surface: u32,
+    pub border: u32,
+    pub ink: u32,
+    pub muted: u32,
+    pub warning: u32,
+    pub success: u32,
+    pub error: u32,
+    pub button: u32,
+    pub button_hover: u32,
+    pub button_active: u32,
+    pub primary_hover: u32,
+    pub primary_active: u32,
+    pub accent: u32,
+}
 
-pub fn apply(cx: &mut App) {
-    Theme::change(ThemeMode::Dark, None, cx);
+impl Palette {
+    pub const fn for_mode(mode: ThemeMode) -> Self {
+        match mode {
+            ThemeMode::Dark => Self {
+                canvas: 0x000000,
+                surface: 0x15181e,
+                border: 0x3b3d45,
+                ink: 0xffffff,
+                muted: 0xb2b6bd,
+                warning: 0xffcf25,
+                success: 0x00ca8e,
+                error: 0xf24c53,
+                button: 0x1f232b,
+                button_hover: 0x3b3d45,
+                button_active: 0x15181e,
+                primary_hover: 0xe5e7eb,
+                primary_active: 0xb2b6bd,
+                accent: 0x2b89ff,
+            },
+            // Preserve the layout and hierarchy of hashicorp while adapting
+            // its dark-only reference to the user's requested daytime mode.
+            ThemeMode::Light => Self {
+                canvas: 0xf7f8fa,
+                surface: 0xffffff,
+                border: 0xcdd2da,
+                ink: 0x15181e,
+                muted: 0x525b69,
+                warning: 0x916000,
+                success: 0x006e4f,
+                error: 0xc22b36,
+                button: 0xeff1f5,
+                button_hover: 0xe2e6ed,
+                button_active: 0xcdd2da,
+                primary_hover: 0x303640,
+                primary_active: 0x000000,
+                accent: 0x1766cf,
+            },
+        }
+    }
+}
+
+pub fn resolve(preference: ThemePreference, appearance: WindowAppearance) -> ThemeMode {
+    if preference.is_dark(ThemeMode::from(appearance).is_dark()) {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    }
+}
+
+pub fn apply(preference: ThemePreference, appearance: WindowAppearance, cx: &mut App) -> Palette {
+    let mode = resolve(preference, appearance);
+    let colors = Palette::for_mode(mode);
+    // Reload the matching component defaults before applying our tokens, so
+    // controls and scrollbars cannot keep colors from the previous mode.
+    Theme::change(mode, None, cx);
     Theme::update(cx, |theme| {
-        theme.font_family = "Microsoft YaHei UI".into();
+        theme.font_family = if cfg!(target_os = "macos") {
+            ".AppleSystemUIFont"
+        } else {
+            "Microsoft YaHei UI"
+        }
+        .into();
         theme.font_size = px(14.);
         theme.radius = px(8.);
         theme.shadow = false;
-        theme.background = rgb(CANVAS).into();
-        theme.foreground = rgb(INK).into();
-        theme.muted_foreground = rgb(MUTED).into();
-        theme.border = rgb(BORDER).into();
-        theme.input = rgb(SURFACE).into();
-        theme.primary = rgb(INK).into();
-        theme.primary_foreground = rgb(CANVAS).into();
-        theme.primary_hover = rgb(0xe5e7eb).into();
-        theme.primary_active = rgb(0xb2b6bd).into();
+        theme.background = rgb(colors.canvas).into();
+        theme.foreground = rgb(colors.ink).into();
+        theme.muted_foreground = rgb(colors.muted).into();
+        theme.muted = rgb(colors.button).into();
+        theme.border = rgb(colors.border).into();
+        theme.input = rgb(colors.border).into();
+        theme.popover = rgb(colors.surface).into();
+        theme.popover_foreground = rgb(colors.ink).into();
+        theme.primary = rgb(colors.ink).into();
+        theme.primary_foreground = rgb(colors.canvas).into();
+        theme.primary_hover = rgb(colors.primary_hover).into();
+        theme.primary_active = rgb(colors.primary_active).into();
         theme.button_primary = theme.primary;
         theme.button_primary_foreground = theme.primary_foreground;
         theme.button_primary_hover = theme.primary_hover;
         theme.button_primary_active = theme.primary_active;
-        theme.button = rgb(0x1f232b).into();
-        theme.button_foreground = rgb(INK).into();
-        theme.button_hover = rgb(BORDER).into();
-        theme.button_active = rgb(SURFACE).into();
-        theme.ring = rgb(0x2b89ff).into();
-        theme.success = rgb(0x00ca8e).into();
-        theme.warning = rgb(WARNING).into();
-        theme.danger = rgb(ERROR).into();
+        theme.button = rgb(colors.button).into();
+        theme.button_foreground = rgb(colors.ink).into();
+        theme.button_hover = rgb(colors.button_hover).into();
+        theme.button_active = rgb(colors.button_active).into();
+        theme.ring = rgb(colors.accent).into();
+        theme.link = rgb(colors.accent).into();
+        theme.caret = rgb(colors.ink).into();
+        theme.success = rgb(colors.success).into();
+        theme.warning = rgb(colors.warning).into();
+        theme.danger = rgb(colors.error).into();
     });
+    colors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Palette, resolve};
+    use gpui_kit::WindowAppearance;
+    use gpui_kit::component::ThemeMode;
+    use tiny_proxy::app::appearance::ThemePreference;
+
+    #[test]
+    fn follow_system_handles_normal_and_vibrant_appearances() {
+        for (appearance, mode) in [
+            (WindowAppearance::Light, ThemeMode::Light),
+            (WindowAppearance::VibrantLight, ThemeMode::Light),
+            (WindowAppearance::Dark, ThemeMode::Dark),
+            (WindowAppearance::VibrantDark, ThemeMode::Dark),
+        ] {
+            assert_eq!(resolve(ThemePreference::System, appearance), mode);
+            assert_eq!(
+                resolve(ThemePreference::Light, appearance),
+                ThemeMode::Light
+            );
+            assert_eq!(resolve(ThemePreference::Dark, appearance), ThemeMode::Dark);
+        }
+    }
+
+    fn luminance(color: u32) -> f64 {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 0xff) as f64 / 255.;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast(a: u32, b: u32) -> f64 {
+        let a = luminance(a);
+        let b = luminance(b);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn both_palettes_keep_text_and_status_readable_on_page_and_panels() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let colors = Palette::for_mode(mode);
+            for background in [colors.canvas, colors.surface] {
+                for foreground in [
+                    colors.ink,
+                    colors.muted,
+                    colors.warning,
+                    colors.success,
+                    colors.error,
+                ] {
+                    assert!(
+                        contrast(foreground, background) >= 4.5,
+                        "{mode:?}: #{foreground:06x} on #{background:06x}"
+                    );
+                }
+            }
+            for background in [colors.button, colors.button_hover, colors.button_active] {
+                assert!(contrast(colors.ink, background) >= 4.5);
+            }
+            for background in [colors.ink, colors.primary_hover, colors.primary_active] {
+                assert!(contrast(colors.canvas, background) >= 4.5);
+            }
+            assert!(contrast(colors.accent, colors.canvas) >= 4.5);
+        }
+    }
 }

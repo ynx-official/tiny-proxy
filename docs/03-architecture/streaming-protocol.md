@@ -44,7 +44,7 @@ Created → OpeningUpstream → Streaming → Completed / Incomplete / Failed / 
 
 2026-10-13 实测 Codex 的成功 SSE 响应可能缺少 Content-Type。缺少该头时允许进入有大小和时间上限的 SSE 解析；显式声明其他内容类型时拒绝。缺失头不豁免 UTF-8、帧、事件、身份及完整终态检查，JSON/HTML、空流和中断仍失败。
 
-completed 的 output 若为空，可从同一响应的 output_item.done 重建聚合输出：必须已收到所有连续索引条目的完整快照，message 状态为 completed，且与已接收增量和函数调用一致；仅有 delta、缺少 done、未完成条目、身份冲突均不满足条件。非空终态快照仍按原规则核对，不能用先前快照掩盖冲突。始终等待 response.completed 和正常流结束，不把 item.done 当作整个请求成功。原生 Responses 流转发上游事件；聚合 Responses 结果可包含上述经过校验的重建输出。
+completed 的 output 若为空，可从同一响应的 output_item.done 重建聚合输出：必须已收到所有连续索引条目的完整快照，message 状态为 completed，且与已接收增量和函数调用一致；仅有 delta、缺少 done、未完成条目、身份冲突均不满足条件。非空终态快照仍按原规则核对，不能用先前快照掩盖冲突。不把 item.done 当作整个请求成功。2026-10-13 根据长请求排障修正：有效 response.completed / response.incomplete 校验通过后结束请求，不继续等待传输 EOF 或可选上游 [DONE] 的剩余分片；当前已解码批次中的重复/矛盾事件仍拒绝，后续连接已取消，不声称检查了未读取的尾部事件。无可信终态的 EOF 仍失败。原生 Responses 流转发上游事件；聚合 Responses 结果可包含上述经过校验的重建输出。
 
 ## 内部语义事件（设计名）
 

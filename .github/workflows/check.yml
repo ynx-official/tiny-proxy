@@ -1,4 +1,4 @@
-name: Windows checks
+name: Native checks
 on:
   push:
   pull_request:
@@ -6,12 +6,49 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
-      - uses: actions/checkout@v4
-      - name: Install tested Rust toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+      - name: Validate release metadata and tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/release_notes.py --check-current
+          python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py
+      - name: Use a temporary keychain for macOS credential tests
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_KEYCHAIN="$RUNNER_TEMP/tiny-proxy-ci.keychain-db"
+          TEST_PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::$TEST_PASSWORD"
+          security create-keychain -p "$TEST_PASSWORD" "$TEST_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$TEST_KEYCHAIN"
+          security unlock-keychain -p "$TEST_PASSWORD" "$TEST_KEYCHAIN"
+          security default-keychain -d user -s "$TEST_KEYCHAIN"
+          security list-keychains -d user -s "$TEST_KEYCHAIN"
       - run: cargo +1.96.0 fmt --all -- --check
       - run: cargo +1.96.0 clippy --all-targets --locked -- -D warnings
       - run: cargo +1.96.0 test --all-targets --locked
-      - run: cargo +1.96.0 build --release --locked
+      - run: cargo +1.96.0 build --release --locked --target ${{ matrix.target }} --bin tiny-proxy

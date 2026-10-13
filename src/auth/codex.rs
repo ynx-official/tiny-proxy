@@ -427,7 +427,9 @@ impl Service {
             .await
             .map_err(|_| Error::Storage)?
         {
-            let raw = protection::unprotect(&blob).map_err(|_| Error::Storage)?;
+            let raw = protection::unprotect_async(&blob)
+                .await
+                .map_err(|_| Error::Storage)?;
             let bundle: Bundle = serde_json::from_slice(&raw).map_err(|_| Error::Storage)?;
             self.store
                 .upsert_account(
@@ -522,7 +524,9 @@ impl Service {
                 self.migrate_legacy().await?;
                 let bytes =
                     Zeroizing::new(serde_json::to_vec(&bundle).map_err(|_| Error::Storage)?);
-                let blob = protection::protect(&bytes).map_err(|_| Error::Storage)?;
+                let blob = protection::protect_async(bytes)
+                    .await
+                    .map_err(|_| Error::Storage)?;
                 self.store
                     .upsert_account(
                         &bundle.local_id(),
@@ -544,7 +548,9 @@ impl Service {
     }
     async fn save(&self, id: &str, generation: i64, bundle: &Bundle) -> Result<(), Error> {
         let bytes = Zeroizing::new(serde_json::to_vec(bundle).map_err(|_| Error::Storage)?);
-        let protected = protection::protect(&bytes).map_err(|_| Error::Storage)?;
+        let protected = protection::protect_async(bytes)
+            .await
+            .map_err(|_| Error::Storage)?;
         self.store
             .rotate_account(id, generation, &protected, bundle.expires_at)
             .await
@@ -563,7 +569,9 @@ impl Service {
                 .await
                 .map_err(|_| Error::Storage)?
                 .ok_or(Error::NoAccount)?;
-            let plaintext = protection::unprotect(&bytes).map_err(|_| Error::Storage)?;
+            let plaintext = protection::unprotect_async(&bytes)
+                .await
+                .map_err(|_| Error::Storage)?;
             let previous: Bundle =
                 serde_json::from_slice(&plaintext).map_err(|_| Error::Storage)?;
             if previous.expires_at > now() + 60 {

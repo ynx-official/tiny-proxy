@@ -51,6 +51,14 @@ impl Fixture {
                 let mode=body["input"][0]["content"][0]["text"].as_str().or_else(||body["input"][0]["content"].as_str()).unwrap_or("normal");
                 if mode=="401" {return (axum::http::StatusCode::UNAUTHORIZED,"secret upstream body").into_response();}
                 if mode=="bad" {return ([("content-type","text/event-stream")],Body::from(frame(created()))).into_response();}
+                if mode=="failed-event" {return ([("content-type","text/event-stream")],Body::from([created(),json!({"type":"response.failed","response":{"id":"r","status":"failed","error":{"message":"private upstream failure detail"}}})].into_iter().flat_map(|v|frame(v).to_vec()).collect::<Vec<_>>())).into_response();}
+                if mode=="terminal-open" || mode=="terminal-partial-tail" {
+                    let mut terminal=frame(json!({"type":"response.completed","response":{"id":"r","created_at":100,"model":"fixture","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1}}})).to_vec();
+                    if mode=="terminal-partial-tail" {terminal.extend_from_slice(b"data: [DO");}
+                    let stream=stream::iter([frame(created()),Bytes::from(terminal)].map(Ok::<_,std::convert::Infallible>))
+                        .chain(stream::pending());
+                    return ([("content-type","text/event-stream")],Body::from_stream(stream)).into_response();
+                }
                 if mode=="tools" {
                     let call=json!({"type":"function_call","id":"item1","call_id":"call1","name":"read_file","arguments":"{\"path\":\"a.rs\"}"});
                     let data=[created(),json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"item1","call_id":"call1","name":"read_file","arguments":""}}),json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":"}),json!({"type":"response.completed","response":{"id":"r","created_at":100,"model":"fixture","status":"completed","output":[call]}})];
@@ -113,6 +121,134 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+#[tokio::test]
+async fn a_valid_terminal_finishes_without_waiting_for_the_upstream_socket_to_close() {
+    let f = Fixture::new().await;
+    for mode in ["terminal-open", "terminal-partial-tail"] {
+        for chat in [true, false] {
+            for stream in [true, false] {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let route = if chat { "chat/completions" } else { "responses" };
+                    let body = if chat { json!({"model":"fixture","messages":[{"role":"user","content":mode}],"stream":stream}) } else { json!({"model":"fixture","input":mode,"stream":stream}) };
+                    let response = reqwest::Client::new().post(format!("http://{}/v1/{route}", f.gateway.address))
+                        .bearer_auth(f.key.value.as_str()).json(&body).send().await.unwrap();
+                    let id = response.headers()["x-request-id"].to_str().unwrap().to_owned();
+                    let text = response.text().await.unwrap();
+                    assert!(text.contains(if chat && stream { "[DONE]" } else if chat { "completion_tokens" } else { "completed" }));
+                    let saved = f.store.request_record(&id).await.unwrap().unwrap();
+                    assert_eq!(saved.outcome, "completed");
+                    assert_eq!(saved.input_tokens, Some(2));
+                    assert_eq!(saved.output_tokens, Some(1));
+                    assert!(saved.ended_at.is_some());
+                }).await.expect("valid terminal was held until upstream EOF");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_metadata_and_disconnect_are_persisted_without_request_contents() {
+    let mut f = Fixture::new().await;
+    let response = f.post("private-user-prompt-should-not-be-saved").await;
+    let id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut stream = response.bytes_stream();
+    stream.next().await.unwrap().unwrap();
+    let live = f
+        .gateway
+        .live_records()
+        .into_iter()
+        .find(|r| r.id == id)
+        .unwrap();
+    assert_eq!(live.outcome, "running");
+    assert!(live.ended_at.is_none());
+    assert_eq!(live.key_id.as_deref(), Some(f.key.id.as_str()));
+    assert_eq!(live.stream, Some(true));
+    assert_eq!(live.message_count, Some(1));
+    assert!(live.body_bytes.unwrap() > 0);
+    assert!(live.first_byte_at.is_some());
+    assert!(f.store.request_record(&id).await.unwrap().is_some());
+    drop(stream);
+    f.drained().await;
+    f.gateway.stop().await;
+    let saved = f.store.request_record(&id).await.unwrap().unwrap();
+    assert_eq!(saved.outcome, "cancelled");
+    assert!(saved.ended_at.unwrap() >= saved.started_at);
+    assert_eq!(
+        f.store.failure_records(0, 100).await.unwrap()[0].code,
+        "client_disconnected"
+    );
+    f.store.close().await;
+    let raw = std::fs::read(f._dir.path().join("app.db")).unwrap();
+    for secret in [
+        "private-user-prompt-should-not-be-saved",
+        f.key.value.as_str(),
+    ] {
+        assert!(!raw.windows(secret.len()).any(|w| w == secret.as_bytes()));
+    }
+}
+
+#[tokio::test]
+async fn validation_auth_and_stream_failures_have_separate_exception_rows() {
+    let mut f = Fixture::new().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{}/v1/responses", f.gateway.address))
+        .bearer_auth(f.key.value.as_str())
+        .json(&json!({"model":"fixture","input":"private input","private-field-name":true}))
+        .send()
+        .await
+        .unwrap();
+    let id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(response.status(), 400);
+    let r = f.store.request_record(&id).await.unwrap().unwrap();
+    assert_eq!(r.http_status, Some(400));
+    assert_eq!(r.phase, "validating");
+    assert_eq!(
+        f.store.failure_records(0, 100).await.unwrap()[0].code,
+        "unsupported_or_invalid_parameter"
+    );
+    let response = client
+        .get(format!("http://{}/v1/models", f.gateway.address))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
+    assert!(
+        f.store
+            .failure_records(0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.code == "invalid_gateway_key")
+    );
+    let response = f.post("failed-event").await;
+    let id = response.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let text = response.text().await.unwrap();
+    assert!(text.contains("upstream_failed"));
+    assert!(!text.contains("[DONE]"));
+    f.gateway.stop().await;
+    let r = f.store.request_record(&id).await.unwrap().unwrap();
+    assert_eq!(r.outcome, "failed");
+    assert_eq!(r.http_status, Some(200));
+    assert_eq!(r.upstream_status, Some(200));
+    let errors = f.store.failure_records(0, 100).await.unwrap();
+    assert_eq!(errors.len(), 3);
+    assert!(errors.iter().all(|e| !e.message.contains("private")));
+    assert_eq!(
+        errors.iter().find(|e| e.request_id == id).unwrap().code,
+        "upstream_failed"
+    );
 }
 
 #[tokio::test]

@@ -5,3 +5,4 @@ pub mod gateway;
 pub mod platform;
 pub mod protocol;
 pub mod storage;
+pub mod updater;

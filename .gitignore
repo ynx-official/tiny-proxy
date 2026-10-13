@@ -6,3 +6,6 @@
 .env.*
 *.log
 /artifacts/
+/dist/
+__pycache__/
+*.pyc

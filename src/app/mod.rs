@@ -4,7 +4,7 @@ use crate::{
         probe::ProbeResult,
     },
     gateway::{Gateway, Record, validate_bind},
-    storage::{AccountSummary, CreatedKey, KeySummary, ModelTest, Store},
+    storage::{AccountSummary, CreatedKey, FailureRecord, KeySummary, ModelTest, Store},
 };
 use std::collections::VecDeque;
 use std::{path::PathBuf, thread::JoinHandle, time::Duration};
@@ -12,7 +12,15 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+pub mod appearance;
+use appearance::ThemePreference;
+
 pub enum Command {
+    CheckUpdate,
+    DownloadUpdate,
+    CancelUpdateDownload,
+    InstallUpdate,
+    ConfigureUpdates(crate::updater::Preferences),
     SignIn,
     Cancel,
     RefreshModels,
@@ -24,8 +32,24 @@ pub enum Command {
     RefreshUsage(String),
     StartGateway(String),
     StopGateway,
+    HistoryPage { requests: i64, failures: i64 },
+    RequestDetail(String),
+    SetThemePreference(ThemePreference),
+}
+pub struct HistorySnapshot {
+    pub requests: Vec<Record>,
+    pub failures: Vec<FailureRecord>,
+    pub request_count: i64,
+    pub failure_count: i64,
+    pub request_page: i64,
+    pub failure_page: i64,
+    pub write_failures: u64,
 }
 pub enum Event {
+    Update(Box<crate::updater::Snapshot>),
+    UpdateProgress(u64, u64),
+    UpdateNotice(String),
+    QuitForUpdate,
     Snapshot {
         keys: Vec<KeySummary>,
         codex_connected: bool,
@@ -33,6 +57,7 @@ pub enum Event {
         models: Vec<Model>,
         models_checked_at: Option<i64>,
         tests: Vec<ModelTest>,
+        theme_preference: ThemePreference,
     },
     Status {
         message: String,
@@ -44,9 +69,11 @@ pub enum Event {
     },
     Gateway {
         address: Option<String>,
-        records: Vec<Record>,
     },
+    History(Box<HistorySnapshot>),
+    RequestDetail(Box<Record>),
     GatewayBind(String),
+    ThemePreferenceSaved(Result<ThemePreference, String>),
     OpenBrowser(Zeroizing<String>),
     KeyCreated(CreatedKey),
     KeyRevealed {
@@ -81,8 +108,15 @@ impl Backend {
                 Ok(runtime)=>runtime,Err(_)=>{let _=sender.blocking_send(Event::Error("后台运行时初始化失败".into()));return;}
             };
             runtime.block_on(async {
+                let mut cleanup_store = None;
                 // A full UI queue cannot prevent closing the application.
-                tokio::select! {biased;_=stop.cancelled()=>{},_=run(database,legacy_directories,receiver,sender,stop.clone())=>{}}
+                tokio::select! {biased;_=stop.cancelled()=>{},_=run(database,legacy_directories,receiver,sender,stop.clone(), &mut cleanup_store)=>{}}
+                // The run future may be dropped while a full UI queue blocks it.
+                // Close persisted in-flight rows even on that shutdown path.
+                if let Some(store) = cleanup_store {
+                    if store.interrupt_requests(chrono::Utc::now().timestamp_millis(), "application_shutdown").await.is_err() { eprintln!("request_shutdown_record_failed"); }
+                    store.close().await;
+                }
             });
             runtime.shutdown_timeout(Duration::from_secs(2));
         })?;
@@ -156,6 +190,7 @@ async fn snapshot(store: &Store, service: &Service, sender: &mpsc::Sender<Event>
         } else {
             vec![]
         };
+        let theme_preference = store.theme_preference().await.map_err(|_| ())?;
         Ok::<_, ()>(Event::Snapshot {
             keys,
             codex_connected,
@@ -163,6 +198,7 @@ async fn snapshot(store: &Store, service: &Service, sender: &mpsc::Sender<Event>
             models,
             models_checked_at,
             tests,
+            theme_preference,
         })
     }
     .await;
@@ -235,7 +271,6 @@ async fn announce_gateway(gateway: &Gateway, sender: &mpsc::Sender<Event>, busy:
     let _ = sender
         .send(Event::Gateway {
             address: Some(gateway.address.to_string()),
-            records: gateway.records(),
         })
         .await;
     let _ = sender
@@ -244,6 +279,47 @@ async fn announce_gateway(gateway: &Gateway, sender: &mpsc::Sender<Event>, busy:
             busy,
         })
         .await;
+}
+async fn history(
+    store: &Store,
+    gateway: Option<&Gateway>,
+    sender: &mpsc::Sender<Event>,
+    request_page: i64,
+    failure_page: i64,
+) {
+    let state = async {
+        let (request_count, failure_count) = store.record_counts().await?;
+        let request_page = request_page.clamp(0, (request_count - 1).max(0) / 100);
+        let failure_page = failure_page.clamp(0, (failure_count - 1).max(0) / 100);
+        let mut requests = store.request_records(request_page * 100, 100).await?;
+        if let Some(gateway) = gateway {
+            for live in gateway.live_records() {
+                if let Some(record) = requests.iter_mut().find(|r| r.id == live.id) {
+                    *record = live;
+                }
+            }
+        }
+        Ok::<_, crate::storage::Error>(HistorySnapshot {
+            requests,
+            failures: store.failure_records(failure_page * 100, 100).await?,
+            request_count,
+            failure_count,
+            request_page,
+            failure_page,
+            write_failures: gateway.map_or(0, Gateway::log_write_failures),
+        })
+    }
+    .await;
+    match state {
+        Ok(state) => {
+            let _ = sender.try_send(Event::History(Box::new(state)));
+        }
+        Err(_) => {
+            let _ = sender.try_send(Event::Error(
+                "请求记录读取失败，已有记录保留在本地数据库".into(),
+            ));
+        }
+    }
 }
 
 async fn restore_gateway(
@@ -276,6 +352,7 @@ async fn run(
     mut commands: mpsc::Receiver<Command>,
     sender: mpsc::Sender<Event>,
     shutdown: CancellationToken,
+    cleanup_store: &mut Option<Store>,
 ) {
     match crate::storage::recovery::recover_legacy(&database, &legacy_directories).await {
         Ok(Some(source)) => eprintln!("storage_recovered source={}", source.display()),
@@ -296,6 +373,7 @@ async fn run(
             return;
         }
     };
+    *cleanup_store = Some(store.clone());
     let service = match Service::new(store.clone()) {
         Ok(s) => s,
         Err(e) => {
@@ -303,7 +381,16 @@ async fn run(
             return;
         }
     };
-    if service.initialize().await.is_err() || store.interrupt_model_tests().await.is_err() {
+    if service.initialize().await.is_err()
+        || store.interrupt_model_tests().await.is_err()
+        || store
+            .interrupt_requests(
+                chrono::Utc::now().timestamp_millis(),
+                "application_interrupted",
+            )
+            .await
+            .is_err()
+    {
         let _ = sender
             .send(Event::Error("本地账号恢复失败，原有数据已保留".into()))
             .await;
@@ -322,6 +409,15 @@ async fn run(
         }
     };
     let mut jobs = JoinSet::<Result<Outcome, String>>::new();
+    let mut updates =
+        match crate::updater::runtime::Updates::new(&store, sender.clone(), shutdown.clone()).await
+        {
+            Ok(updates) => updates,
+            Err(error) => {
+                let _ = sender.send(Event::Error(error)).await;
+                return;
+            }
+        };
     let mut operation = CancellationToken::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut usage_tick = tokio::time::interval(Duration::from_secs(60));
@@ -329,8 +425,19 @@ async fn run(
     let mut usage_queue = VecDeque::<String>::new();
     let mut usage_current: Option<String> = None;
     let mut usage_jobs = JoinSet::new();
+    let mut request_page = 0;
+    let mut failure_page = 0;
+    history(
+        &store,
+        gateway.as_ref(),
+        &sender,
+        request_page,
+        failure_page,
+    )
+    .await;
     loop {
-        if usage_jobs.is_empty()
+        if !updates.installing()
+            && usage_jobs.is_empty()
             && let Some(id) = usage_queue.pop_front()
         {
             usage_current = Some(id.clone());
@@ -341,6 +448,9 @@ async fn run(
         tokio::select! {
             biased;
             _=shutdown.cancelled()=>break,
+            result=updates.jobs.join_next(),if !updates.jobs.is_empty()=>{
+                if updates.complete(&store,result).await { break; }
+            },
             result=jobs.join_next(),if !jobs.is_empty()=>{
                 match result {
                     Some(Ok(Ok(Outcome::SignedIn)))=>{
@@ -366,14 +476,53 @@ async fn run(
                 let _=sender.send(Event::UsageBusy(None)).await;
                 snapshot(&store,&service,&sender).await;
             },
-            _=usage_tick.tick()=>{
+            _=usage_tick.tick(),if !updates.installing()=>{
+                if store.prune_request_records(chrono::Utc::now().timestamp_millis() - 7 * 24 * 3600 * 1000, 10000).await.is_err() { let _=sender.try_send(Event::Error("过期请求记录清理失败".into())); }
                 if let Ok(ids)=store.due_accounts(now()).await {
                     for id in ids {if usage_current.as_ref()!=Some(&id) && !usage_queue.contains(&id){usage_queue.push_back(id);}}
                 }
             },
             command=commands.recv()=>{
                 let Some(command)=command else {break};
+                if updates.installing() { continue; }
                 match command {
+                    Command::CheckUpdate=>updates.check(),
+                    Command::DownloadUpdate=>updates.download(),
+                    Command::CancelUpdateDownload=>updates.cancel_download(),
+                    Command::ConfigureUpdates(preferences)=>updates.configure(&store,preferences).await,
+                    Command::InstallUpdate=>{
+                        if let Some((info,path))=updates.ready() {
+                            let _=sender.send(Event::Status{message:"已确认安装，正在停止网关并收尾记录…".into(),busy:true}).await;
+                            operation.cancel();jobs.abort_all();usage_jobs.abort_all();
+                            while jobs.join_next().await.is_some() {}
+                            while usage_jobs.join_next().await.is_some() {}
+                            usage_current=None;usage_queue.clear();
+                            let _=sender.send(Event::UsageBusy(None)).await;
+                            if let Some(mut g)=gateway.take(){g.stop().await;let _=sender.send(Event::Gateway{address:None}).await;}
+                            if store.interrupt_requests(chrono::Utc::now().timestamp_millis(),"application_update").await.is_err() || store.interrupt_model_tests().await.is_err() {
+                                let _=sender.send(Event::Error("更新前无法收尾记录；请重试".into())).await;
+                            } else { updates.install(info,path); }
+                        }
+                    },
+                    Command::SetThemePreference(preference)=>{
+                        let result=store.save_theme_preference(preference).await
+                            .map(|()|preference)
+                            .map_err(|_|"主题设置保存失败，已保留原主题，请重试".to_owned());
+                        let _=sender.send(Event::ThemePreferenceSaved(result)).await;
+                    },
+                    Command::HistoryPage{requests,failures}=>{
+                        request_page=requests.max(0);failure_page=failures.max(0);
+                        history(&store,gateway.as_ref(),&sender,request_page,failure_page).await;
+                    },
+                    Command::RequestDetail(id)=>{
+                        match store.request_record(&id).await {
+                            Ok(Some(mut record))=>{
+                                if let Some(g)=&gateway && let Some(live)=g.live_records().into_iter().find(|r|r.id==id){record=live;}
+                                let _=sender.try_send(Event::RequestDetail(Box::new(record)));
+                            },
+                            _=>{let _=sender.try_send(Event::Error("请求记录不存在、已过期或无法读取".into()));}
+                        }
+                    },
                     Command::RevealKey{id,copy}=>{
                         match store.reveal_key(&id).await {
                             Ok(value)=>{let _=sender.send(Event::KeyRevealed{key:CreatedKey{id,value},copy}).await;},
@@ -403,7 +552,8 @@ async fn run(
                     },
                     Command::Cancel=>operation.cancel(),
                     Command::StopGateway=>{
-                        if let Some(mut g)=gateway.take(){g.stop().await;let _=sender.send(Event::Gateway{address:None,records:g.records()}).await;}
+                        if let Some(mut g)=gateway.take(){g.stop().await;let _=sender.send(Event::Gateway{address:None}).await;}
+                        history(&store,None,&sender,request_page,failure_page).await;
                         let _=sender.send(Event::Status{message:"网关已停止，监听及在途请求已关闭".into(),busy:!jobs.is_empty()}).await;
                     },
                     Command::StartGateway(value)=>{
@@ -441,7 +591,7 @@ async fn run(
                     }
                 }
             },
-            _=tick.tick()=>{if let Some(g)=&gateway {let _=sender.try_send(Event::Gateway{address:Some(g.address.to_string()),records:g.records()});}}
+            _=tick.tick()=>{updates.tick();history(&store,gateway.as_ref(),&sender,request_page,failure_page).await;}
         }
     }
     operation.cancel();
@@ -451,5 +601,4 @@ async fn run(
     if let Some(mut g) = gateway {
         g.stop().await;
     }
-    store.close().await;
 }

@@ -38,10 +38,14 @@
 | 安全 | [权限矩阵与威胁模型](03-architecture/threat-model.md) |
 | 参考依据 | [cursor-byok 分析与来源](03-architecture/reference-analysis.md) |
 | 决策记录 | [桌面技术栈](03-architecture/adr/0001-desktop-stack.md)、[Codex 路线](03-architecture/adr/0003-codex-device-gateway.md)、[本地账号状态与额度](03-architecture/adr/0004-local-account-state.md)、[历史认证候选](99-archive/adr-0002-siwc-candidate.md) |
-| 质量 | [验证计划](04-quality/verification-plan.md) |
-| 使用与维护 | [桌面运行、接入和恢复](05-operations/desktop-operations.md) |
+| 质量 | [验证计划](04-quality/verification-plan.md)、[请求记录测试清单](04-quality/request-records-checklist.md)、[主题验证清单](04-quality/theme-checklist.md) |
+| 使用与维护 | [桌面运行、接入和恢复](05-operations/desktop-operations.md)、[请求记录与长耗时诊断](05-operations/request-diagnostics.md) |
 | 归档 | [早期认证方案](99-archive/siwc-authentication.md)、[早期验证记录](99-archive/siwc-probe-implementation.md) |
 | 交付 | [分阶段开发计划](06-delivery/development-plan.md)、[开发验证记录](06-delivery/implementation-status.md) |
+| 在线更新 | [架构与凭据决定](03-architecture/adr/0005-online-update-release.md)、[构建与更新操作](05-operations/build-and-package.md)、[测试清单](04-quality/online-update-checklist.md) |
+| 发版资料 | [发版流程](06-delivery/release-process.md)、[版本总览](upgrade/README.md)、[v0.1.0 开发详情](upgrade/v0.1.0/README.md)、[CHANGELOG](../CHANGELOG.md) |
+
+2026-10-13 用户要求增加白天模式并默认跟随电脑；行为与配色见 [桌面视觉系统](02-design/visual-system.md#白天模式与跟随电脑)，对应 A-theme-01—A-theme-04。源码已修改，未执行编译、自动测试或桌面实机验证，待验事项见 [主题清单](04-quality/theme-checklist.md)。
 
 ## 评审方式
 
@@ -63,3 +67,7 @@
 2026-10-13 index 与同类问题成组修复，对照 codex-proxy-dev 后采用 [客户端历史与空值规范化](03-architecture/api-contracts.md#客户端历史与空值兼容规则)，对应 A17g/A17h；[参考方式比较](03-architecture/reference-analysis.md#codex-proxy-dev-兼容方式核对2026-10-13)和 [构建验证](06-delivery/implementation-status.md#客户端历史与空值兼容2026-10-13)分别记录源码证据与运行证据。
 
 2026-10-13 用户要求撤销 Key 后删除、不再展示，权威规则见 [B20](01-requirements/business-rules.md)，验收 A45—A47；[0005 历史清理](03-architecture/data-model.md#0005-已撤销密钥清理)及 [验证记录](06-delivery/implementation-status.md#撤销密钥即删除2026-10-13)说明升级与运行边界。
+
+2026-10-13 用户批准仅持久化请求元数据、将异常记录分开；请求正文保存方案未被采用。权威行为见 [请求诊断](05-operations/request-diagnostics.md)，验收 A48—A52，迁移为 0006。用户随后要求默认只改代码、告知测试事项，不自动编译/构建/打包；执行规则见 [AGENTS.md](../AGENTS.md)，最终待验事项见 [测试清单](04-quality/request-records-checklist.md)。
+
+2026-10-13 用户确认请求体 413 后要求取消大小限制，权威规则见 [B21](01-requirements/business-rules.md) 和 [API 契约](03-architecture/api-contracts.md#图片输入兼容规则)，验收为 A54；历史 413 仍可通过 [请求明细](05-operations/request-diagnostics.md) 排查。源码修改、未运行事项及请求输入资源边界见 [验证记录](06-delivery/implementation-status.md) 和 [威胁模型](03-architecture/threat-model.md#剩余风险)。

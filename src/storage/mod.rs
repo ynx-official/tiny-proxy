@@ -10,7 +10,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 mod desktop;
 pub mod recovery;
+mod requests;
+mod updates;
 pub use desktop::{AccountSummary, ModelTest};
+pub use requests::{FailureRecord, RequestRecord};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -24,6 +27,8 @@ pub enum Error {
     Conflict,
     #[error("invalid label")]
     InvalidLabel,
+    #[error("invalid theme preference")]
+    InvalidThemePreference,
     #[error("invalid issued client ID")]
     InvalidRegistration,
     #[error("local database operation failed")]
@@ -132,8 +137,10 @@ impl Store {
         let secret = Zeroizing::new(URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>()));
         let digest = Sha256::digest(secret.as_bytes()).to_vec();
         let value = Zeroizing::new(format!("tp_{id}.{}", secret.as_str()));
-        let encrypted = crate::platform::protection::protect(value.as_bytes())
-            .map_err(|_| Error::Unavailable)?;
+        let encrypted =
+            crate::platform::protection::protect_async(Zeroizing::new(value.as_bytes().to_vec()))
+                .await
+                .map_err(|_| Error::Unavailable)?;
         sqlx::query(
             "INSERT INTO client_keys (id, label, public_prefix, secret_digest,encrypted_value) VALUES (?, ?, ?, ?, ?)",
         )

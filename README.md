@@ -1,59 +1,211 @@
+![Tiny Proxy](assets/icons/png/tiny-proxy-128.png)
+
 # Tiny Proxy
 
-原生桌面 Codex 模型网关，供本人在不同设备和 Agent 中使用。技术栈：GPUI + GPUI Kit + Tokio + Axum + SQLite。
+**连接你的 Codex 账号、个人设备与 AI Agent。**
 
-当前是 **Codex 网关开发版**：按 cursor-byok-main 的 Codex 设备码认证、模型目录和 Responses 上游接入，提供带独立密钥的标准模型 API。已验证真实账号登录、模型目录及一次完整文本调用；真实工具往返、Trae 版本及第二台设备尚待联调，不宣称完整 OpenAI 兼容或全部产品原型已实现。
+![阶段：开发版](https://img.shields.io/badge/status-development-blue)
+![平台：Windows x64](https://img.shields.io/badge/platform-Windows_x64-0078D4)
+![语言：Rust 1.96.0](https://img.shields.io/badge/Rust-1.96.0-orange)
+![API：兼容子集](https://img.shields.io/badge/API-compatible_subset-2E8555)
 
-- [文档索引](docs/README.md)
-- [Codex 路线决定](docs/03-architecture/adr/0003-codex-device-gateway.md)
-- [当前验证记录](docs/06-delivery/implementation-status.md)
-- [Trae 接入步骤与排障](docs/05-operations/trae-connection.md)
+[快速开始](#-快速开始) · [客户端接入](#-客户端接入) · [API 兼容](#-api-兼容范围) · [当前进度](#-当前进度) · [文档](#-文档)
 
-## 启动
+Tiny Proxy 是供个人在不同设备和 Agent 中使用的原生桌面 Codex 模型网关。通过设备码登录账号，在本机提供带独立密钥的模型 API，供局域网或个人 VPN 内的客户端调用，无需预装 Codex。
 
-Windows x64，Rust 1.96.0，Visual Studio C++ Build Tools：
+> 当前为 **Codex 网关开发版**，提供明确的 API 兼容子集。真实账号登录、模型目录和一次完整文本调用已验证；其余联调进度见下方「当前进度」。
 
-```powershell
-cargo run
+---
+
+## ✨ 特性
+
+🖥️ **原生桌面界面** — 使用 GPUI + GPUI Kit，集中管理账号、模型、客户端接入和请求记录。
+
+🔑 **独立设备码登录** — 在浏览器完成授权，支持多账号保存、手动切换和请求前自动续期。
+
+🤖 **统一模型接口** — 提供模型目录、Chat Completions 与 Responses 子集，支持 SSE 和聚合 JSON。
+
+🌐 **个人设备接入** — 为不同客户端创建独立密钥，使用具体的本机、LAN 或 VPN 地址监听。
+
+📊 **账号状态持久化** — 按账号保存模型目录、文本测试结果与额度快照，运行期间每小时只读查询额度。
+
+🔒 **本地凭据保护** — OAuth 凭据与新网关密钥使用 Windows 用户级 DPAPI；外部客户端只持有网关密钥。
+
+🔄 **在线更新与双平台发版** — 已移植 ashell 的检查、校验、下载与安装重启流程；发布配置仅 Windows x64 和 macOS arm64，各有安装包与便携包。代码与工作流已加入，真实构建及升级待验证。
+
+## 🌻 为什么做 Tiny Proxy
+
+在不同设备和 Agent 之间使用同一套个人模型入口，需要把账号登录、模型选择和客户端配置放在一起管理。
+
+Tiny Proxy 在桌面上管理这些状态，由内嵌网关完成请求转换与转发。客户端负责执行工具，应用负责账号连接和模型 API；访问范围限定为局域网与个人 VPN。
+
+```text
+个人设备 / Agent  →  Tiny Proxy  →  Codex 上游
+     网关密钥          本机 OAuth 凭据
 ```
 
-也可打开 target/debug/tiny-proxy.exe。desktop_probe.exe 仅是早期最小窗口探测。
+## 🚀 快速开始
 
-1. 账号连接 → 使用 Codex 设备码登录 → 复制设备码，在浏览器授权。
-2. 模型 → 读取目录 → 测试文本（会使用当前账号额度）。
-3. 客户端接入 → 创建独立密钥；新密钥可随时查看或复制，重启后仍可取回。
-4. 首次配置时输入这台电脑的具体 IP:端口并启动。留空默认 127.0.0.1:8787；跨设备应填写本机 LAN/VPN 地址。成功监听后保存地址，下次打开应用自动启动代理。
-5. 在 Trae 填写应用显示的 Base URL、网关密钥、模型目录中的准确 ID。
+### 启动应用
 
-应用启动时，在本地账号和有效客户端密钥齐备后自动监听；无历史地址时默认 127.0.0.1:8787。端口占用或地址不可用会显示错误，可在客户端接入页修改并重试。手动停止只影响本次运行；关闭窗口停止网关并退出，下次启动仍自动监听。不自动修改防火墙，不启用公网/通配监听。
+源码运行环境：**Windows x64、Rust 1.96.0、Visual Studio C++ Build Tools**。
 
-## 已实现的 API 子集
-
-- GET /v1/models
-- POST /v1/chat/completions：文本、用户 Base64 图片、函数工具调用和结果历史，SSE/聚合 JSON。
-- POST /v1/responses：文本/用户 Base64 图片/函数/推理回放子集，SSE/聚合 JSON。
-
-所有路由要求 Authorization: Bearer <网关密钥>。OAuth Token 仅由本机用于固定 Codex 上游，工具由外部 Agent 执行。Chat 的 max_tokens/max_completion_tokens 和 Responses 的 max_output_tokens 接受正整数或 null；正整数仅作兼容接收，不传给 Codex、不执行输出上限，并通过响应头明确提示。图片仅支持 user 消息的 Base64 PNG/JPEG/WebP/GIF，保留图文顺序与 detail；不下载图片网址，请求体仍限 2 MiB。未知参数、非用户消息图片、托管工具、temperature 等未支持字段的非空值仍明确报错，见 [API 契约](docs/03-architecture/api-contracts.md)。图片转换已有自动测试，真实 Codex 图片调用和客户端重试尚待验证。
-
-默认最多 4 个并发请求、请求体 2 MiB、响应 16 MiB、SSE 单事件 1 MiB、上游空闲 90 秒、慢消费者等待 30 秒。撤销客户端密钥会拒绝新请求并取消该密钥的在途请求。
-
-撤销成功后删除整条 Key 记录，不再显示在列表或明文预览中，重启后也不再出现；新版启动时清理历史已撤销 Key，保留有效 Key。删除后的旧值返回 401 invalid_gateway_key。
-
-Chat assistant 历史消息兼容 `reasoning_content` 字符串/null；推理文本不回放给 Codex，非空值通过响应头提示。正文与工具历史保留，Responses 原生推理回放按原规则处理，详见 [兼容规则](docs/03-architecture/api-contracts.md#chat-推理历史兼容规则)。
-
-兼容客户端合并流式工具后保留的 `tool_calls[].index`、匹配的工具结果 `name`、assistant 拒绝信息及已列明的可选 null 占位；无参数工具可省略 parameters。采用显式规范化后重建上游请求，未知字段与非空未支持参数仍拒绝，详见 [客户端历史与空值规则](docs/03-architecture/api-contracts.md#客户端历史与空值兼容规则)。
-
-## 数据与边界
-
-默认目录 %USERPROFILE%/.tiny-proxy；开发隔离可设置 TINY_PROXY_DATA_DIR。默认首次启动会从旧 AppData/TinyProxy 或打包启动器的 LocalCache 中恢复唯一一份有数据的旧库，保留原库；新库存在后不再迁移。这样从 PowerShell、资源管理器和 Codex 启动都使用同一份数据，详见 [数据目录与恢复](docs/05-operations/desktop-operations.md#数据目录统一与历史恢复)。Codex 凭据与新网关密钥使用 Windows 用户级 DPAPI；密钥另存摘要用于鉴权。旧摘要密钥仍有效，但无法还原明文。
-
-支持多账号保存及手动切换、请求前自动续期；账号各自的模型目录、显式文本测试结果/时间、额度快照持久化。应用运行时每小时查询各账号额度，也可手动刷新；关闭期间不查询，重开补查到期账号。运行网关时先停止再切换账号。远端撤销、托盘、自启、安装包和完整设置尚未实现。最近 100 条生成请求只存内存元数据，不记录提示词、回答、工具参数。
-
-## 验证命令
+在项目根目录执行：
 
 ```powershell
+cargo run --locked
+```
+
+已有构建时，也可打开 `target/debug/tiny-proxy.exe`。当前尚无安装包；`desktop_probe.exe` 仅用于早期最小窗口探测。源码修改不会自动更新已有 EXE，具体构建与验证状态见 [开发验证记录](docs/06-delivery/implementation-status.md)。
+
+### 完成首次配置
+
+1. **账号连接**：选择 Codex 设备码登录，复制设备码，在浏览器完成授权。
+2. **模型**：读取当前账号的模型目录，复制所需模型的准确 ID；可执行文本测试，该操作会使用账号额度。
+3. **客户端接入**：创建独立网关密钥。新密钥可反复查看、复制，重启后仍可取回。
+4. **启动网关**：填写这台电脑的具体 `IP:端口`。留空使用 `127.0.0.1:8787`；跨设备填写本机 LAN/VPN 地址。
+5. **配置客户端**：填写应用显示的 Base URL、网关密钥和模型 ID，先尝试一次文本调用。
+
+### 后续启动
+
+已有本地账号和有效客户端密钥时，应用打开后自动监听上次成功保存的地址；无历史地址时使用 `127.0.0.1:8787`。
+
+- 修改监听地址或切换账号前，先停止网关。
+- 端口占用或地址不可用时，应用显示错误，可修改地址后重试。
+- 手动停止只影响本次运行；关闭窗口停止网关并退出，下次打开仍自动监听。
+- 应用不自动修改防火墙，不启用公网或通配监听。
+
+## 🔌 客户端接入
+
+以支持 OpenAI Chat Completions 的客户端为例：
+
+| 配置项 | 填写内容 |
+|---|---|
+| 接口格式 | OpenAI Chat Completions |
+| Base URL | 应用显示的地址，本机默认为 `http://127.0.0.1:8787/v1` |
+| API Key | Tiny Proxy 创建的独立网关密钥 |
+| 模型 ID | 从当前账号模型目录复制的准确 ID |
+
+跨设备使用具体的 LAN/VPN 地址。若客户端要求完整请求 URL，填写应用展示的 `/v1/chat/completions` 地址，避免重复拼接 `/v1`。
+
+Trae 的详细配置、错误码和排障步骤见 [Trae 接入指南](docs/05-operations/trae-connection.md)。真实 Trae 版本、工具往返和第二台设备仍待联调。
+
+## 🧩 API 兼容范围
+
+### 接口
+
+| 方法 | 路径 | 支持内容 |
+|---|---|---|
+| `GET` | `/v1/models` | 当前账号的模型目录 |
+| `POST` | `/v1/chat/completions` | 文本、用户 Base64 图片、函数工具调用与结果历史；SSE / 聚合 JSON |
+| `POST` | `/v1/responses` | 文本、用户 Base64 图片、函数工具与推理回放子集；SSE / 聚合 JSON |
+
+所有路由均要求：
+
+```http
+Authorization: Bearer YOUR_GATEWAY_KEY
+```
+
+OAuth Token 仅由本机用于固定 Codex 上游。外部客户端不能管理账号、监听设置或读取凭据，工具由客户端执行。
+
+### 兼容规则
+
+| 场景 | 当前处理 |
+|---|---|
+| 图片输入 | 仅支持 `user` 消息中的 Base64 PNG / JPEG / WebP / GIF，保留图文顺序与 `detail`；不下载图片网址 |
+| 输出长度 | 接收 `max_tokens` / `max_completion_tokens` / `max_output_tokens` 的正整数或 `null`；正整数不传给 Codex、不限制输出，通过响应头提示 |
+| Chat 推理历史 | 接收 assistant 消息的 `reasoning_content` 字符串 / `null`；推理文本不回放，非空值通过响应头提示 |
+| 工具与空值 | 兼容已列明的 `tool_calls[].index`、匹配的工具结果 `name`、assistant 拒绝信息与可选 `null`；无参数工具可省略 `parameters` |
+| 未支持内容 | 未知字段、非用户消息图片、托管工具，以及 `temperature` 等未支持字段的非空值，明确报错 |
+
+字段定义、响应头与错误契约以 [API 契约](docs/03-architecture/api-contracts.md) 为准。图片转换已有自动测试，真实 Codex 图片调用及客户端重试尚待验证。
+
+### 运行限制
+
+| 项目 | 默认值 |
+|---|---|
+| 请求体大小 | 不设本地上限；上游规则仍适用 |
+| 并发生成请求 | 最多 4 个 |
+| 响应大小 | 16 MiB |
+| SSE 单事件 | 1 MiB |
+| 上游空闲等待 | 90 秒 |
+| 慢消费者等待 | 30 秒 |
+
+撤销密钥会拒绝新请求、取消该密钥的在途请求，并删除整条密钥记录及明文预览。重启后不再显示，旧值返回 `401 invalid_gateway_key`；新版启动时清理历史已撤销密钥，有效密钥保留。
+
+## 💾 本地数据与安全
+
+### 数据保存
+
+默认数据目录为 Windows `%USERPROFILE%/.tiny-proxy`、macOS `~/.tiny-proxy`，开发隔离可设置 `TINY_PROXY_DATA_DIR`。
+
+首次使用新默认目录时，可从旧 `AppData/TinyProxy` 或打包启动器的 `LocalCache` 恢复唯一一份有数据的旧库，并保留原库；目标库存在后不再迁移。PowerShell、资源管理器和 Codex 启动使用同一份默认数据，详见 [数据目录与恢复](docs/05-operations/desktop-operations.md#数据目录统一与历史恢复)。
+
+账号各自的模型目录、显式文本测试结果与时间、额度快照保存在 SQLite 中。应用运行时每小时查询各账号额度，也可手动刷新；关闭期间不查询，重开补查到期账号。
+
+### 凭据与隐私
+
+- Codex 凭据与新网关密钥使用 Windows 用户级 DPAPI；网关密钥另存摘要用于鉴权。
+- macOS 已补齐钥匙串/AES-256-GCM 保护代码；钥匙串保存加密密钥，SQLite 只保存凭据密文，真实平台验证尚未执行。仅复制数据库不能跨平台或跨用户恢复凭据，见 [平台决定](docs/03-architecture/adr/0005-online-update-release.md)。
+- 旧版只保存摘要的密钥仍有效，但无法还原明文。
+- 请求诊断只保存元数据，不保存提示词、代码、回答、图片、工具参数或认证信息。
+
+### 请求诊断
+
+请求元数据持久化与独立「失败异常」分页视图已加入代码，可查看起止时间、首个输出、请求大小、消息与工具数量、HTTP 状态和用量。
+
+已结束记录按 **7 天或最近 10,000 条** 保留，运行中的记录不清理。异常退出后标记为中断，保留最近已观察耗时，恢复时间不作为真实结束时间。
+
+> 此部分最终代码与桌面界面尚待验证，当前运行的旧版不会自动获得这些改动。使用说明见 [请求诊断](docs/05-operations/request-diagnostics.md)，验收见 [测试清单](docs/04-quality/request-records-checklist.md)。
+
+## 🚧 当前进度
+
+| 状态 | 范围 |
+|---|---|
+| 已有真实验证 | Codex 账号登录、模型目录、一次完整文本调用 |
+| 尚待真实联调 | Codex 图片、完整工具往返、实际 Trae 版本、第二台设备 |
+| 最终代码待验证 | 请求元数据持久化、失败异常分页与详情界面；请求体上限取消；在线更新、双平台打包流水线与 macOS 凭据保护 |
+| 尚未实现 | 远端撤销、托盘、开机自启、其余完整设置 |
+
+完整实现范围和历史检查证据见 [开发验证记录](docs/06-delivery/implementation-status.md)。当前不宣称完整 OpenAI 兼容，也不将全部产品原型视为已实现页面。
+
+## 外观主题
+
+设置 → 外观主题提供“跟随电脑 / 白天模式 / 夜间模式”。默认跟随电脑的应用主题，手动选择会本地保存并在重启后恢复；跟随模式响应运行期间的系统外观变化。该功能已修改源码，尚未编译或进行桌面实机验证，当前旧程序不会自动更新。待验场景与命令见 [主题验证清单](docs/04-quality/theme-checklist.md)。
+
+## 🛠️ 开发与验证
+
+设置 → 在线更新，支持启动/定时/关闭自动检查、更新说明、下载进度与取消重试。只有手动确认才安装并重启。GitHub 手动工作流只上传产物，版本标签才发布 Release；详见 [构建与更新](docs/05-operations/build-and-package.md)、[发版流程](docs/06-delivery/release-process.md)和 [版本总览](docs/upgrade/README.md)。当前未构建或发布这些安装包。
+
+技术栈：**Rust · GPUI · GPUI Kit · Tokio · Axum · SQLite**。采用单进程、单 Cargo package 内部分模块，UI 通过应用服务访问网络与存储。
+
+按 [项目约定](AGENTS.md)，默认交付代码与测试清单；只有用户明确要求时才执行相应的编译型验证、构建或打包。以下命令供选择，不是每次修改后的自动步骤。
+
+```powershell
+# 源码格式检查，不触发编译
 cargo fmt --all -- --check
+
+# 以下命令会触发编译，按明确请求执行
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --all-targets --locked
 cargo build --locked
 ```
+
+## 📚 文档
+
+| 想了解什么 | 阅读入口 |
+|---|---|
+| 全部文档 | [文档索引](docs/README.md) |
+| 产品范围与验收 | [PRD](docs/01-requirements/prd.md) · [MVP 验收](docs/01-requirements/acceptance/mvp.md) |
+| 页面与交互 | [桌面流程](docs/02-design/desktop-flows.md) · [全页面 ASCII 原型](docs/02-design/ascii-prototype.md) |
+| 架构与技术选择 | [架构概览](docs/03-architecture/overview.md) · [Codex 路线决定](docs/03-architecture/adr/0003-codex-device-gateway.md) |
+| API 与协议 | [API 契约](docs/03-architecture/api-contracts.md) · [流式协议](docs/03-architecture/streaming-protocol.md) |
+| 运行与接入 | [桌面运行与恢复](docs/05-operations/desktop-operations.md) · [Trae 接入](docs/05-operations/trae-connection.md) |
+| 请求排障 | [请求诊断](docs/05-operations/request-diagnostics.md) · [测试清单](docs/04-quality/request-records-checklist.md) |
+| 开发进度 | [实施计划](docs/06-delivery/development-plan.md) · [验证记录](docs/06-delivery/implementation-status.md) |
+| 更新与打包 | [双平台操作](docs/05-operations/build-and-package.md) · [更新验收](docs/04-quality/online-update-checklist.md) |
+| 版本与发版 | [流程规范](docs/06-delivery/release-process.md) · [版本总览](docs/upgrade/README.md) · [CHANGELOG](CHANGELOG.md) |
+
+---
+
+文档状态：Review · 最后更新：2026-10-13 · 排版参考：[radioactive-state](https://github.com/MananTank/radioactive-state)

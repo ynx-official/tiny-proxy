@@ -1,4 +1,5 @@
 use super::{Error, Store};
+use crate::app::appearance::ThemePreference;
 use crate::platform::protection;
 use sqlx::{FromRow, Row};
 use zeroize::Zeroizing;
@@ -31,6 +32,27 @@ pub struct ModelTest {
     pub output_tokens: Option<i64>,
 }
 impl Store {
+    pub async fn theme_preference(&self) -> Result<ThemePreference, Error> {
+        let value: String =
+            sqlx::query_scalar("SELECT theme_preference FROM app_settings WHERE singleton_id=1")
+                .fetch_one(&self.pool)
+                .await?;
+        value.parse()
+    }
+
+    pub async fn save_theme_preference(&self, preference: ThemePreference) -> Result<(), Error> {
+        let affected =
+            sqlx::query("UPDATE app_settings SET theme_preference=? WHERE singleton_id=1")
+                .bind(preference.as_str())
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        if affected != 1 {
+            return Err(Error::Unavailable);
+        }
+        Ok(())
+    }
+
     pub async fn gateway_bind(&self) -> Result<String, Error> {
         Ok(
             sqlx::query_scalar("SELECT gateway_bind FROM app_settings WHERE singleton_id=1")
@@ -56,7 +78,9 @@ impl Store {
         let blob: Vec<u8> = row
             .get::<Option<Vec<u8>>, _>("encrypted_value")
             .ok_or(Error::KeyUnavailable)?;
-        let raw = protection::unprotect(&blob).map_err(|_| Error::Unavailable)?;
+        let raw = protection::unprotect_async(&blob)
+            .await
+            .map_err(|_| Error::Unavailable)?;
         Ok(Zeroizing::new(
             String::from_utf8(raw.to_vec()).map_err(|_| Error::Unavailable)?,
         ))

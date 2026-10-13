@@ -108,7 +108,7 @@ Trae 文档确认自定义模型可使用 Chat Completions，支持 Base URL 或
 - 接受 image/png、image/jpeg、image/webp、image/gif 的非空标准 Base64 data URL，校验 MIME 和编码格式。图片字节是否能解码、GIF 是否静态及模型视觉能力由上游校验；网关不解码/压缩图片像素。拒绝空值、损坏的 Base64、其他 MIME、HTTP(S)/file URL、file_id 和未知图片字段；错误不包含图片数据。
 - detail 省略时补 auto；显式 auto、low、high、original 原样保留，其他值（包括 null）拒绝。未在每个 Codex 模型上实测全部 detail 模式，上游拒绝时保留失败语义。
 - system/developer/assistant 与工具结果中的图片仍拒绝；不静默丢弃图片。参考项目外部 Chat/Responses 入口的工具结果只提取文本，本次不扩展工具图片或其他协议别名。
-- 请求体仍限 2 MiB（包括 Base64、JSON 和全部历史），超限返回 413。鉴权、取消与并发限制共用原路径；网关不抓取图片地址、不读取本地图片路径、不存储图片正文。真实客户端可能需缩小图片后重试。
+- 2026-10-13 用户确认 413 后明确要求“代码里面改为不限制”，替代此前 2 MiB 总请求限制。Chat/Responses 显式关闭 Axum 默认请求体限制，文本、工具历史和 Base64 图片不按字节数拒绝；带 Content-Length 和分块请求共用此规则。正文仍完整读入内存并执行 JSON、字段、工具历史和图片格式校验；不承诺突破客户端、可用内存或上游自身限制。网关不抓取图片地址、不读取本地图片路径、不存储图片正文。
 
 ## 输出长度参数兼容规则
 
@@ -143,7 +143,7 @@ JSON 错误外壳为 error 对象，至少含 message、type、code，可含 par
 | 401 | invalid_gateway_key；仅表示客户端密钥缺失、错误或已撤销并删除 |
 | 403 | 撤销与已通过鉴权请求竞争时的 key_revoked，或已明确的模型权限限制 |
 | 404 | model_not_found 或未知路径 |
-| 413 | request_too_large |
+| 415 | invalid_request；Content-Type 必须为 application/json 或受支持的 +json 类型 |
 | 429 | gateway_concurrency_limit 或上游限流；有真实 Retry-After 才透传/映射 |
 | 502 | upstream_protocol_error、upstream_stream_interrupted、不可直接映射的上游错误 |
 | 503 | account_not_ready、upstream_auth_required、gateway_stopping、临时上游不可用 |

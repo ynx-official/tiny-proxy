@@ -12,7 +12,7 @@ pub struct DataLocation {
 impl DataLocation {
     pub fn from_environment() -> io::Result<Self> {
         let explicit = std::env::var_os("TINY_PROXY_DATA_DIR");
-        let profile = std::env::var_os("USERPROFILE");
+        let profile = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
         let local = std::env::var_os("LOCALAPPDATA");
         let directory = resolve(explicit.as_deref(), profile.as_deref())?;
         let legacy_directories = if explicit.is_none() && !directory.join("app.db").try_exists()? {
@@ -44,10 +44,12 @@ pub fn resolve(explicit: Option<&OsStr>, profile: Option<&OsStr>) -> io::Result<
     }
     // AppData can resolve to an MSIX launcher's private LocalCache. This location
     // gives PowerShell, Explorer and packaged launchers the same database.
-    Ok(PathBuf::from(
-        profile
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "USERPROFILE is unavailable"))?,
-    )
+    Ok(PathBuf::from(profile.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "user home directory is unavailable",
+        )
+    })?)
     .join(".tiny-proxy"))
 }
 

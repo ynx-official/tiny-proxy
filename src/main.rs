@@ -6,6 +6,13 @@ use tiny_proxy::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--version")
+    {
+        println!("Tiny Proxy {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let location = DataLocation::from_environment()?;
     let data = location.directory;
     std::fs::create_dir_all(&data)?;

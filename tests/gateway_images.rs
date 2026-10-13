@@ -1,5 +1,6 @@
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -206,7 +207,7 @@ fn images_do_not_bypass_role_or_tool_history_constraints() {
 }
 
 #[tokio::test]
-async fn images_reach_http_upstream_for_json_and_sse_with_auth_and_size_limits() {
+async fn images_and_large_requests_reach_http_upstream_with_auth() {
     let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
     let received = seen.clone();
     let upstream = Router::new()
@@ -221,7 +222,10 @@ async fn images_reach_http_upstream_for_json_and_sse_with_auth_and_size_limits()
                 ];
                 ([("content-type", "text/event-stream")], events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>())
             }
-        }));
+        }))
+        // The fake upstream must accept large bodies so this test observes the
+        // gateway's behavior rather than Axum's default limit in the fixture.
+        .layer(DefaultBodyLimit::disable());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
@@ -238,13 +242,14 @@ async fn images_reach_http_upstream_for_json_and_sse_with_auth_and_size_limits()
         .unwrap();
     let service = Service::for_test(store.clone(), address).unwrap();
     let key = store.create_key("image fixture").await.unwrap();
-    let mut gateway = Gateway::start("127.0.0.1:0".parse().unwrap(), store, service)
+    let mut gateway = Gateway::start("127.0.0.1:0".parse().unwrap(), store.clone(), service)
         .await
         .unwrap();
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
+    let mut large_records = vec![];
     for chat in [true, false] {
         let url = format!(
             "http://{}/v1/{}",
@@ -315,21 +320,127 @@ async fn images_reach_http_upstream_for_json_and_sse_with_auth_and_size_limits()
             assert_eq!(error["error"]["code"], "unsupported_or_invalid_parameter");
             assert!(!error.to_string().contains("private"));
         }
-        let large = format!(
+        assert_eq!(seen.lock().unwrap().len(), before);
+        let large_image = format!(
             "data:image/png;base64,{}",
             STANDARD.encode(vec![0; 2 * 1024 * 1024])
         );
+        let large_text = "large history fixture ".repeat(160_000);
+        for (content, expected) in [
+            (
+                json!([image(chat, &large_image)]),
+                json!([{"type":"input_image","image_url":large_image,"detail":"auto"}]),
+            ),
+            (
+                json!(large_text),
+                json!([{"type":"input_text","text":large_text}]),
+            ),
+        ] {
+            for stream in [false, true] {
+                for chunked in [false, true] {
+                    let mut body = request(chat, content.clone());
+                    body["stream"] = json!(stream);
+                    let encoded = serde_json::to_vec(&body).unwrap();
+                    assert!(encoded.len() > 2 * 1024 * 1024);
+                    let body_size = encoded.len() as i64;
+                    let builder = http
+                        .post(&url)
+                        .bearer_auth(key.value.as_str())
+                        .header("content-type", "application/json");
+                    let builder = if chunked {
+                        let chunks = encoded
+                            .chunks(64 * 1024)
+                            .map(|chunk| Ok::<_, std::io::Error>(chunk.to_vec()))
+                            .collect::<Vec<_>>();
+                        builder.body(reqwest::Body::wrap_stream(futures_util::stream::iter(
+                            chunks,
+                        )))
+                    } else {
+                        builder.body(encoded)
+                    };
+                    let request = builder.build().unwrap();
+                    if chunked {
+                        assert!(!request.headers().contains_key("content-length"));
+                    }
+                    let response = http.execute(request).await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        200,
+                        "chat={chat}, stream={stream}, chunked={chunked}"
+                    );
+                    large_records.push((
+                        response.headers()["x-request-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_string(),
+                        body_size,
+                    ));
+                    if stream {
+                        let text = response.text().await.unwrap();
+                        assert!(text.contains("image received"));
+                        assert!(text.contains(if chat { "[DONE]" } else { "response.completed" }));
+                    } else {
+                        let value: Value = response.json().await.unwrap();
+                        if chat {
+                            assert_eq!(value["choices"][0]["message"]["content"], "image received");
+                        } else {
+                            assert_eq!(value["status"], "completed");
+                        }
+                    }
+                    assert_eq!(
+                        seen.lock().unwrap().last().unwrap()["input"][0]["content"],
+                        expected
+                    );
+                }
+            }
+        }
+        assert_eq!(seen.lock().unwrap().len(), before + 8);
+
+        // Large inputs still require authentication and valid JSON/content.
+        let large_body = request(chat, json!("history ".repeat(400_000)));
+        let before_rejected = seen.lock().unwrap().len();
+        let response = http.post(&url).json(&large_body).send().await.unwrap();
+        assert_eq!(response.status(), 401);
         let response = http
             .post(&url)
             .bearer_auth(key.value.as_str())
-            .json(&request(chat, json!([image(chat, &large)])))
+            .header("content-type", "application/json")
+            .body(format!("{{{}", " ".repeat(3 * 1024 * 1024)))
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 413);
-        assert_eq!(seen.lock().unwrap().len(), before);
+        assert_eq!(response.status(), 400);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "invalid_request");
+        assert!(!error.to_string().contains("MiB"));
+        let response = http
+            .post(&url)
+            .bearer_auth(key.value.as_str())
+            .header("content-type", "text/plain")
+            .body(large_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 415);
+        let mut invalid = large_body;
+        invalid["temperature"] = json!(0.2);
+        let response = http
+            .post(&url)
+            .bearer_auth(key.value.as_str())
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        assert_eq!(seen.lock().unwrap().len(), before_rejected);
     }
-    assert_eq!(seen.lock().unwrap().len(), 4);
+    assert_eq!(seen.lock().unwrap().len(), 20);
     gateway.stop().await;
+    for (id, body_size) in large_records {
+        let record = store.request_record(&id).await.unwrap().unwrap();
+        assert_eq!(record.body_bytes, Some(body_size));
+        assert_eq!(record.outcome, "completed");
+        assert_eq!(record.http_status, Some(200));
+    }
     task.abort();
 }

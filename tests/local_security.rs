@@ -3,9 +3,9 @@ use tiny_proxy::{
     storage::{Error, KeyStatus, Store},
 };
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[test]
-fn dpapi_roundtrip_and_tamper_rejection() {
+fn platform_protection_roundtrip_and_tamper_rejection() {
     let plaintext = b"synthetic-refresh-token-do-not-use";
     let mut ciphertext = protection::protect(plaintext).unwrap();
     assert!(
@@ -18,6 +18,22 @@ fn dpapi_roundtrip_and_tamper_rejection() {
     ciphertext[index] ^= 0x80;
     assert!(protection::unprotect(&ciphertext).is_err());
     assert!(protection::unprotect(&[]).is_err());
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[tokio::test]
+async fn asynchronous_platform_protection_preserves_roundtrip_and_tamper_rejection() {
+    let plaintext = b"synthetic-async-token-do-not-use";
+    let mut encrypted = protection::protect_async(zeroize::Zeroizing::new(plaintext.to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(
+        &**protection::unprotect_async(&encrypted).await.unwrap(),
+        plaintext
+    );
+    let last = encrypted.len() - 1;
+    encrypted[last] ^= 1;
+    assert!(protection::unprotect_async(&encrypted).await.is_err());
 }
 
 #[test]

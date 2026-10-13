@@ -34,7 +34,7 @@ HTTP 用于本人可信 LAN/VPN。应用不修改 Windows 防火墙；需要跨�
 
 `Invalid or unsupported field: reasoning_content` 可由旧版消息字段校验返回，尚未发往模型。修复版兼容 assistant 历史中的字符串/null；正文和工具历史继续转发，非空推理文本不回放给 Codex，通过兼容响应头提示。顶层、非 assistant 或错误类型仍拒绝，详见 [Chat 推理历史契约](../03-architecture/api-contracts.md#chat-推理历史兼容规则)。构建路径和验证结果见 [开发验证记录](../06-delivery/implementation-status.md#chat-reasoning_content-兼容2026-10-13)；切换新版后重新尝试原会话。
 
-图片输入追加版本支持 user 消息中的 Base64 PNG/JPEG/WebP/GIF：Chat 使用 image_url 对象（含 url），Responses 使用 input_image 的 image_url 字符串。图文顺序及 detail 保留；HTTP(S) 图片网址、本地路径和工具结果图片仍不支持。整个请求（含 Base64 与历史）超过 2 MiB 返回 413，应缩小图片或减少历史后重试。图片格式与示例见 [API 契约](../03-architecture/api-contracts.md#图片输入兼容规则)；实际构建路径和测试证据见 [开发验证记录](../06-delivery/implementation-status.md)。
+图片输入追加版本支持 user 消息中的 Base64 PNG/JPEG/WebP/GIF：Chat 使用 image_url 对象（含 url），Responses 使用 input_image 的 image_url 字符串。图文顺序及 detail 保留；HTTP(S) 图片网址、本地路径和工具结果图片仍不支持。2026-10-13 按用户要求取消网关请求体大小限制，超过旧 2 MiB 的图片与历史可以提交；JSON、图片格式及上游模型上下文规则仍须满足。当前运行的旧程序需后续构建并重新启动才会得到此改动；取消本地限制不保证上游接受任意大小。图片格式与示例见 [API 契约](../03-architecture/api-contracts.md#图片输入兼容规则)；实际构建路径和测试证据见 [开发验证记录](../06-delivery/implementation-status.md)。
 
 本次图片追加构建位于 artifacts/image-input-fix/tiny-proxy.exe；退出正在运行的旧应用后打开它，再手动启动网关。它包含已有长度参数兼容与本次图片转换，采用构建时的原数据目录逻辑。真实 Codex 图片和客户端重试仍待验证。
 

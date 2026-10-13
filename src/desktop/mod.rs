@@ -1,4 +1,5 @@
 mod theme;
+mod updates;
 
 use gpui_kit::component::{
     button::*,
@@ -8,11 +9,11 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::*, *};
 use std::time::{Duration, Instant};
 use tiny_proxy::{
-    app::{Command, Event},
+    app::{Command, Event, appearance::ThemePreference},
     auth::codex::{Model, VERIFICATION_URL},
     auth::quota::Quota,
     gateway::Record,
-    storage::{AccountSummary, CreatedKey, KeySummary, ModelTest},
+    storage::{AccountSummary, CreatedKey, FailureRecord, KeySummary, ModelTest},
 };
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -59,9 +60,153 @@ fn test_status(value: &str) -> &str {
         _ => "未知",
     }
 }
+fn request_time(value: Option<i64>) -> String {
+    value
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        })
+        .unwrap_or_else(|| "未提供".into())
+}
+fn request_status(value: &str) -> &'static str {
+    match value {
+        "running" => "执行中",
+        "completed" => "完成",
+        "failed" => "失败",
+        "cancelled" => "已取消",
+        "interrupted" => "应用中断",
+        "incomplete" => "受限结束",
+        _ => "未知",
+    }
+}
+fn request_phase(value: &str) -> &'static str {
+    match value {
+        "authenticating" => "网关鉴权",
+        "reading_request" => "读取客户端请求",
+        "validating" => "校验参数",
+        "waiting_upstream" => "等待上游（凭据/目录/响应头）",
+        "receiving" => "接收上游",
+        "sending" => "发送给客户端",
+        "finished" => "已结束",
+        _ => "未知阶段",
+    }
+}
+fn latency(start: i64, time: Option<i64>) -> String {
+    time.map(|time| format!("{:.2} 秒", (time - start).max(0) as f64 / 1000.))
+        .unwrap_or_else(|| "尚未收到".into())
+}
+
+// Rendering and clipboard export share these lines so copied diagnostics match
+// the visible snapshot, including unknown values and recovery-time semantics.
+fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec<String> {
+    let mut metadata = vec![
+        format!(
+            "{} {} · 模型 {} · {}",
+            record.method,
+            record.route,
+            if record.model.is_empty() {
+                "未提供"
+            } else {
+                &record.model
+            },
+            request_status(&record.outcome)
+        ),
+        format!("开始：{}", request_time(Some(record.started_at))),
+        format!(
+            "{}：{} · {} {:.2} 秒",
+            if record.outcome == "interrupted" {
+                "恢复确认时间"
+            } else {
+                "结束"
+            },
+            if record.ended_at.is_none() {
+                "执行中".into()
+            } else {
+                request_time(record.ended_at)
+            },
+            if record.outcome == "interrupted" {
+                "中断前已观察耗时"
+            } else {
+                "耗时"
+            },
+            record.elapsed_ms as f64 / 1000.
+        ),
+        format!(
+            "{}：{}",
+            if record.ended_at.is_none() {
+                "当前阶段"
+            } else {
+                "结束阶段"
+            },
+            request_phase(&record.phase)
+        ),
+        format!(
+            "首批上游数据：{} · 首个输出：{}",
+            latency(record.started_at, record.first_byte_at),
+            latency(record.started_at, record.first_output_at)
+        ),
+        format!("最近上游活动：{}", request_time(record.last_activity_at)),
+        format!(
+            "HTTP：{} · 上游 HTTP：{}",
+            record
+                .http_status
+                .map_or("未返回".into(), |s| s.to_string()),
+            record
+                .upstream_status
+                .map_or("未提供".into(), |s| s.to_string())
+        ),
+        format!(
+            "流式：{} · 请求大小：{} 字节 · 消息/输入项：{} · 工具定义：{}",
+            record
+                .stream
+                .map_or("未提供", |s| if s { "是" } else { "否" }),
+            record.body_bytes.map_or("未提供".into(), |n| n.to_string()),
+            record
+                .message_count
+                .map_or("未提供".into(), |n| n.to_string()),
+            record.tool_count.map_or("未提供".into(), |n| n.to_string())
+        ),
+        format!(
+            "输入/输出 tokens：{} / {}",
+            record
+                .input_tokens
+                .map_or("未提供".into(), |n| n.to_string()),
+            record
+                .output_tokens
+                .map_or("未提供".into(), |n| n.to_string())
+        ),
+        format!("密钥 ID：{}", record.key_id.as_deref().unwrap_or("未鉴权")),
+        format!(
+            "账号 ID：{}",
+            record.account_id.as_deref().unwrap_or("未就绪")
+        ),
+        format!("请求 ID：{}", record.id),
+    ];
+    if let Some(failure) = failure.filter(|failure| failure.request_id == record.id) {
+        metadata.push(format!("异常代码：{}", failure.code));
+        metadata.push(format!("异常原因：{}", failure.message));
+        metadata.push(format!(
+            "异常时间：{} · 异常阶段：{} · 异常 HTTP：{}",
+            request_time(Some(failure.occurred_at)),
+            request_phase(&failure.phase),
+            failure.http_status
+        ));
+    }
+    metadata
+}
 
 struct Desktop {
+    update: tiny_proxy::updater::Snapshot,
+    update_interval: Entity<InputState>,
+    update_notice: Option<String>,
+    confirm_update: bool,
     page: usize,
+    theme_preference: ThemePreference,
+    theme_loaded: bool,
+    theme_saving: bool,
+    colors: theme::Palette,
     commands: mpsc::Sender<Command>,
     events: mpsc::Receiver<Event>,
     status: String,
@@ -76,6 +221,14 @@ struct Desktop {
     device_code: Option<(Zeroizing<String>, Instant)>,
     gateway_address: Option<String>,
     records: Vec<Record>,
+    failures: Vec<FailureRecord>,
+    request_count: i64,
+    failure_count: i64,
+    request_page: i64,
+    failure_page: i64,
+    show_failures: bool,
+    selected_request: Option<Record>,
+    log_write_failures: u64,
     bind_address: Entity<InputState>,
     models: Vec<Model>,
     key_name: Entity<InputState>,
@@ -91,6 +244,14 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let colors = theme::apply(ThemePreference::default(), window.appearance(), cx);
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.theme_preference == ThemePreference::System {
+                this.update_theme(window, cx);
+                cx.notify();
+            }
+        })
+        .detach();
         // The background runtime owns networking and SQLite. GPUI only drains a
         // bounded event queue; no Tokio runtime is created per click or render.
         cx.spawn_in(window, async move |view, cx| {
@@ -108,7 +269,18 @@ impl Desktop {
         })
         .detach();
         Self {
+            update: tiny_proxy::updater::Snapshot {
+                preferences: Default::default(),
+                status: Default::default(),
+            },
+            update_interval: cx.new(|cx| InputState::new(window, cx).placeholder("24")),
+            update_notice: None,
+            confirm_update: false,
             page: 0,
+            theme_preference: ThemePreference::default(),
+            theme_loaded: false,
+            theme_saving: false,
+            colors,
             commands,
             events,
             status: "正在打开本地存储…".into(),
@@ -123,6 +295,14 @@ impl Desktop {
             device_code: None,
             gateway_address: None,
             records: vec![],
+            failures: vec![],
+            request_count: 0,
+            failure_count: 0,
+            request_page: 0,
+            failure_page: 0,
+            show_failures: false,
+            selected_request: None,
+            log_write_failures: 0,
             bind_address: cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1:8787")),
             models: vec![],
             key_name: cx.new(|cx| InputState::new(window, cx).placeholder("例如：工作电脑 Trae")),
@@ -137,6 +317,43 @@ impl Desktop {
         while let Ok(event) = self.events.try_recv() {
             changed = true;
             match event {
+                Event::Update(update) => {
+                    if !update.preferences.notify {
+                        self.update_notice = None;
+                    }
+                    if update.preferences != self.update.preferences {
+                        self.update_interval.update(cx, |input, cx| {
+                            input.set_value(
+                                update.preferences.interval_hours.to_string(),
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                    if !matches!(
+                        update.status,
+                        tiny_proxy::updater::UpdateStatus::ReadyToRestart(..)
+                    ) {
+                        self.confirm_update = false;
+                    }
+                    self.update = *update;
+                }
+                Event::UpdateNotice(message) => self.update_notice = Some(message),
+                Event::UpdateProgress(done, total) => {
+                    if let tiny_proxy::updater::UpdateStatus::Downloading(
+                        _,
+                        current,
+                        total_current,
+                    ) = &mut self.update.status
+                    {
+                        *current = done;
+                        *total_current = total;
+                    }
+                }
+                Event::QuitForUpdate => {
+                    cx.quit();
+                    return;
+                }
                 Event::Snapshot {
                     keys,
                     codex_connected,
@@ -144,7 +361,13 @@ impl Desktop {
                     models,
                     models_checked_at,
                     tests,
+                    theme_preference,
                 } => {
+                    if !self.theme_loaded || self.theme_preference != theme_preference {
+                        self.theme_preference = theme_preference;
+                        self.theme_loaded = true;
+                        self.update_theme(window, cx);
+                    }
                     if self.accounts.iter().find(|a| a.active).map(|a| &a.id)
                         != accounts.iter().find(|a| a.active).map(|a| &a.id)
                     {
@@ -175,13 +398,42 @@ impl Desktop {
                 Event::DeviceCode { code, expires_in } => {
                     self.device_code = Some((code, Instant::now() + expires_in))
                 }
-                Event::Gateway { address, records } => {
+                Event::Gateway { address } => {
                     self.gateway_address = address;
-                    self.records = records;
                 }
+                Event::History(history) => {
+                    if let Some(selected) = &mut self.selected_request
+                        && let Some(current) = history.requests.iter().find(|r| r.id == selected.id)
+                    {
+                        *selected = current.clone();
+                    }
+                    self.records = history.requests;
+                    self.failures = history.failures;
+                    self.request_count = history.request_count;
+                    self.failure_count = history.failure_count;
+                    self.request_page = history.request_page;
+                    self.failure_page = history.failure_page;
+                    self.log_write_failures = history.write_failures;
+                }
+                Event::RequestDetail(record) => self.selected_request = Some(*record),
                 Event::GatewayBind(address) => {
                     self.bind_address
                         .update(cx, |input, cx| input.set_value(address, window, cx));
+                }
+                Event::ThemePreferenceSaved(result) => {
+                    self.theme_saving = false;
+                    match result {
+                        Ok(preference) => {
+                            self.theme_preference = preference;
+                            self.update_theme(window, cx);
+                            self.status = "主题设置已保存".into();
+                            self.error = false;
+                        }
+                        Err(message) => {
+                            self.status = message;
+                            self.error = true;
+                        }
+                    }
                 }
                 Event::OpenBrowser(url) => cx.open_url(&url),
                 Event::KeyCreated(key) => {
@@ -237,6 +489,27 @@ impl Desktop {
         }
     }
 
+    fn update_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.colors = theme::apply(self.theme_preference, window.appearance(), cx);
+    }
+
+    fn set_theme_preference(&mut self, preference: ThemePreference, cx: &mut Context<Self>) {
+        if !self.theme_loaded || self.theme_saving || preference == self.theme_preference {
+            return;
+        }
+        if self
+            .commands
+            .try_send(Command::SetThemePreference(preference))
+            .is_ok()
+        {
+            self.theme_saving = true;
+        } else {
+            self.status = "主题设置未保存，后台忙碌或已退出，请重试".into();
+            self.error = true;
+        }
+        cx.notify();
+    }
+
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if self.commands.try_send(command).is_err() {
             self.status = "后台忙碌或已经退出，请稍后重试".into();
@@ -253,7 +526,7 @@ impl Desktop {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(self.colors.muted))
                     .child("TINY PROXY / PERSONAL GATEWAY"),
             )
             .child(
@@ -265,25 +538,25 @@ impl Desktop {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(self.colors.muted))
                     .child(subtitle),
             )
     }
 
-    fn panel(title: impl Into<SharedString>, content: impl Into<SharedString>) -> Div {
+    fn panel(&self, title: impl Into<SharedString>, content: impl Into<SharedString>) -> Div {
         div()
             .v_flex()
             .gap_3()
             .p_5()
             .rounded_lg()
-            .bg(rgb(theme::SURFACE))
+            .bg(rgb(self.colors.surface))
             .border_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(self.colors.border))
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title.into()))
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(theme::MUTED))
+                    .text_color(rgb(self.colors.muted))
                     .child(content.into()),
             )
     }
@@ -291,12 +564,12 @@ impl Desktop {
     fn overview(&self, cx: &mut Context<Self>) -> AnyElement {
         div().v_flex().gap_4()
             .child(self.title("Codex 设备码登录 · 为自己的 Agent 提供模型 API。"))
-            .child(Self::panel("服务状态",self.gateway_address.as_ref().map(|a|format!("运行中 · http://{a}/v1")).unwrap_or_else(||"已停止 · 在客户端接入页启动监听".into())))
-            .child(Self::panel("Codex 账号",if self.codex_connected {"已有 Codex 授权凭据；请求前自动检查有效期并续期。模型可用性以调用结果为准。"} else {"尚未连接账号。请前往账号连接，使用设备码完成授权。"}))
+            .child(self.panel("服务状态",self.gateway_address.as_ref().map(|a|format!("运行中 · http://{a}/v1")).unwrap_or_else(||"已停止 · 在客户端接入页启动监听".into())))
+            .child(self.panel("Codex 账号",if self.codex_connected {"已有 Codex 授权凭据；请求前自动检查有效期并续期。模型可用性以调用结果为准。"} else {"尚未连接账号。请前往账号连接，使用设备码完成授权。"}))
             .child(div().h_flex().gap_3()
                 .child(Button::new("overview-login").primary().label("账号连接").on_click(cx.listener(|this,_,_,cx|{this.page=1;cx.notify();})))
                 .child(Button::new("overview-clients").label("配置 Trae 接入").on_click(cx.listener(|this,_,_,cx|{this.page=3;cx.notify();}))))
-            .child(Self::panel("接入流程","首次使用：设备码授权 → 模型页测试 → 创建客户端密钥 → 选择 IP:端口并启动 → 配置 Trae。之后打开应用会自动启动网关。"))
+            .child(self.panel("接入流程","首次使用：设备码授权 → 模型页测试 → 创建客户端密钥 → 选择 IP:端口并启动 → 配置 Trae。之后打开应用会自动启动网关。"))
             .into_any_element()
     }
     fn accounts(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -305,16 +578,16 @@ impl Desktop {
                 .child(Button::new("device-sign-in").primary().label(if self.codex_connected {"添加 / 更新账号授权"} else {"使用 Codex 设备码登录"})
                     .disabled(self.busy || self.gateway_address.is_some()).on_click(cx.listener(|this,_,_,cx|{this.busy=true;this.send(Command::SignIn,cx);})))
                 .child(Button::new("cancel-login").label("取消等待").disabled(!self.busy).on_click(cx.listener(|this,_,_,cx|this.send(Command::Cancel,cx)))))
-            .child(Self::panel("操作方式","获取设备码后，浏览器将打开 OpenAI 的 Codex 设备授权页。在该页面输入下面显示的代码，完成授权后应用会自动接收结果。"));
+            .child(self.panel("操作方式","获取设备码后，浏览器将打开 OpenAI 的 Codex 设备授权页。在该页面输入下面显示的代码，完成授权后应用会自动接收结果。"));
         if let Some((code, _)) = &self.device_code {
             view = view.child(
                 div()
                     .v_flex()
                     .gap_3()
                     .p_5()
-                    .bg(rgb(theme::SURFACE))
+                    .bg(rgb(self.colors.surface))
                     .border_1()
-                    .border_color(rgb(theme::WARNING))
+                    .border_color(rgb(self.colors.warning))
                     .child("正在等待设备授权")
                     .child(
                         div()
@@ -346,9 +619,9 @@ impl Desktop {
                     ),
             );
         }
-        view=view.child(Self::panel("本地账号与自动查询","账号逐条加密保存，重复授权更新原账号。应用运行时每小时查询额度，重新打开后补查到期账号；也可手动刷新。切换网关使用的账号前请先停止监听。"));
+        view=view.child(self.panel("本地账号与自动查询","账号逐条加密保存，重复授权更新原账号。应用运行时每小时查询额度，重新打开后补查到期账号；也可手动刷新。切换网关使用的账号前请先停止监听。"));
         if self.accounts.is_empty() {
-            view = view.child(Self::panel(
+            view = view.child(self.panel(
                 "尚无已保存账号",
                 "完成设备码授权后，账号与额度信息会显示在这里。",
             ));
@@ -361,9 +634,9 @@ impl Desktop {
                 .v_flex()
                 .gap_3()
                 .p_5()
-                .bg(rgb(theme::SURFACE))
+                .bg(rgb(self.colors.surface))
                 .border_1()
-                .border_color(rgb(theme::BORDER))
+                .border_color(rgb(self.colors.border))
                 .child(
                     div()
                         .h_flex()
@@ -457,29 +730,34 @@ impl Desktop {
                 if quota.limit_reached == Some(true) {
                     card = card.child(
                         div()
-                            .text_color(rgb(theme::WARNING))
+                            .text_color(rgb(self.colors.warning))
                             .child("上游提示当前额度已达限制"),
                     );
                 }
                 if let Some(error) = quota.reset_error {
-                    card = card.child(div().text_color(rgb(theme::WARNING)).child(error));
+                    card = card.child(div().text_color(rgb(self.colors.warning)).child(error));
                 }
             } else {
                 card = card.child("尚无额度快照，等待查询或点击刷新额度。");
             }
-            card = card.child(div().text_sm().text_color(rgb(theme::MUTED)).child(format!(
-                    "上次成功：{}\n最近查询：{}  ·  下次自动查询：{}",
-                    format_time(account.usage_checked_at),
-                    format_time(account.usage_attempted_at),
-                    account
-                        .usage_attempted_at
-                        .map(|at| format_time(Some(at + 3600)))
-                        .unwrap_or_else(|| "即将查询".into())
-                )));
+            card = card.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(self.colors.muted))
+                    .child(format!(
+                        "上次成功：{}\n最近查询：{}  ·  下次自动查询：{}",
+                        format_time(account.usage_checked_at),
+                        format_time(account.usage_attempted_at),
+                        account
+                            .usage_attempted_at
+                            .map(|at| format_time(Some(at + 3600)))
+                            .unwrap_or_else(|| "即将查询".into())
+                    )),
+            );
             if let Some(error) = &account.usage_error {
                 card = card.child(
                     div()
-                        .text_color(rgb(theme::WARNING))
+                        .text_color(rgb(self.colors.warning))
                         .child(format!("{error} · 保留上次成功快照")),
                 );
             }
@@ -492,9 +770,9 @@ impl Desktop {
             .v_flex()
             .gap_3()
             .p_5()
-            .bg(rgb(theme::SURFACE))
+            .bg(rgb(self.colors.surface))
             .border_1()
-            .border_color(rgb(theme::BORDER))
+            .border_color(rgb(self.colors.border))
             .child("模型网关监听")
             .child("打开应用时自动恢复上次监听地址，默认 127.0.0.1:8787。修改地址请先停止网关；其他设备使用本机局域网或 VPN 地址。")
             .child(
@@ -537,7 +815,7 @@ impl Desktop {
                             ),
                     ),
             )
-            .child(div().text_sm().text_color(rgb(theme::MUTED)).child(
+            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
                 "HTTP 仅供可信局域网或个人 VPN。密钥和请求内容会经过所选网络；启动不会修改防火墙。",
             ));
         if let Some(address) = &self.gateway_address {
@@ -548,33 +826,247 @@ impl Desktop {
         }
         view
     }
-    fn requests(&self) -> AnyElement {
+    fn requests(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut view = div()
             .v_flex()
             .gap_3()
-            .child(self.title("当前监听会话最近 100 条生成请求；仅保存在内存，重启监听后清空。"));
-        if self.records.is_empty() {
-            view=view.child(Self::panel("暂无请求记录","客户端发起模型生成请求后显示模型、结果、耗时与请求 ID。不记录提示词、回答和工具参数。"));
+            .child(self.title("本地持久化元数据，每秒更新。执行中的请求置顶；保留 7 天或最近 10,000 条已结束记录。"))
+            .child(div().h_flex().gap_2()
+                .child(Button::new("request-tab").label(format!("请求记录 ({})", self.request_count)).when(!self.show_failures, |b|b.primary())
+                    .on_click(cx.listener(|this,_,_,cx| {this.show_failures=false;cx.notify();})))
+                .child(Button::new("failure-tab").label(format!("失败异常 ({})", self.failure_count)).when(self.show_failures, |b|b.primary())
+                    .on_click(cx.listener(|this,_,_,cx| {this.show_failures=true;cx.notify();}))))
+            .child(div().text_sm().text_color(rgb(self.colors.muted)).child("详情包含起止时间、阶段、首个输出和上游活动；不保存聊天、代码、工具参数、回答或认证信息。长耗时本身不代表失败。"));
+        if self.log_write_failures > 0 {
+            view = view.child(div().text_color(rgb(self.colors.error)).child(format!(
+                "本次监听有 {} 次记录写入失败，部分记录可能不完整；请检查数据目录及磁盘。",
+                self.log_write_failures
+            )));
         }
-        for record in &self.records {
-            view = view.child(Self::panel(
-                format!(
-                    "{} · {} · {} ms",
-                    record.model, record.outcome, record.elapsed_ms
+        if let Some(record) = &self.selected_request {
+            let failure = self
+                .failures
+                .iter()
+                .find(|failure| failure.request_id == record.id);
+            let metadata = request_detail_lines(record, failure);
+            let detail_text = format!("请求详情\n{}", metadata.join("\n"));
+            view = view.child(
+                div()
+                    .v_flex()
+                    .min_w_0()
+                    .p_4()
+                    .gap_2()
+                    .bg(rgb(self.colors.surface))
+                    .rounded_lg()
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child("请求详情")
+                            .child(
+                                Button::new("copy-request-detail")
+                                    .label("复制明细")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            detail_text.clone(),
+                                        ));
+                                        this.status = "请求明细已复制".into();
+                                        this.error = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(Button::new("close-request-detail").label("收起").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.selected_request = None;
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .children(metadata.into_iter().map(|line| div().text_sm().child(line))),
+            );
+        }
+        if self.show_failures {
+            if self.failures.is_empty() {
+                view = view.child(self.panel(
+                    "暂无失败异常",
+                    "参数校验失败、上游异常、超时和取消会在这里单独保存，并关联请求 ID。",
+                ));
+            }
+            for failure in &self.failures {
+                let id = failure.request_id.clone();
+                view = view.child(
+                    div()
+                        .v_flex()
+                        .gap_2()
+                        .py_3()
+                        .border_b_1()
+                        .border_color(rgb(self.colors.border))
+                        .child(
+                            div()
+                                .h_flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_color(rgb(self.colors.error))
+                                        .child(failure.code.clone()),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "failure-{}",
+                                        failure.request_id
+                                    )))
+                                    .label("关联请求详情")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.send(Command::RequestDetail(id.clone()), cx)
+                                    })),
+                                ),
+                        )
+                        .child(failure.message.clone())
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(self.colors.muted))
+                                .child(format!(
+                                    "{} · {} · 异常状态 {} · {}",
+                                    request_time(Some(failure.occurred_at)),
+                                    request_phase(&failure.phase),
+                                    failure.http_status,
+                                    failure.request_id
+                                )),
+                        ),
+                );
+            }
+        } else {
+            if self.records.is_empty() {
+                view = view.child(self.panel(
+                    "暂无请求记录",
+                    "客户端 API 请求进入时开始记录；旧版本只有内存记录，无法恢复历史正文或耗时。",
+                ));
+            }
+            for record in &self.records {
+                let id = record.id.clone();
+                let color = match record.outcome.as_str() {
+                    "completed" => self.colors.success,
+                    "failed" | "interrupted" => self.colors.error,
+                    _ => self.colors.warning,
+                };
+                view =
+                    view.child(
+                        div()
+                            .v_flex()
+                            .gap_2()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(self.colors.border))
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_color(rgb(color))
+                                            .child(request_status(&record.outcome)),
+                                    )
+                                    .child(format!(
+                                        "{} · {:.2} 秒{}",
+                                        if record.model.is_empty() {
+                                            "未提供模型"
+                                        } else {
+                                            &record.model
+                                        },
+                                        record.elapsed_ms as f64 / 1000.,
+                                        if record.ended_at.is_none() && record.elapsed_ms >= 60000 {
+                                            " · 长时间执行"
+                                        } else {
+                                            ""
+                                        }
+                                    ))
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "detail-{}",
+                                            record.id
+                                        )))
+                                        .label("详情")
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.send(Command::RequestDetail(id.clone()), cx)
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
+                                format!(
+                                    "{} {} · {}",
+                                    record.method,
+                                    record.route,
+                                    request_phase(&record.phase)
+                                ),
+                            ))
+                            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
+                                format!(
+                                "开始 {} · {} {}",
+                                request_time(Some(record.started_at)),
+                                if record.outcome == "interrupted" { "恢复确认" } else { "结束" },
+                                record
+                                    .ended_at
+                                    .map_or("执行中".into(), |t| request_time(Some(t)))
+                            ),
+                            )),
+                    );
+            }
+        }
+        let (page, total) = if self.show_failures {
+            (self.failure_page, self.failure_count)
+        } else {
+            (self.request_page, self.request_count)
+        };
+        let errors = self.show_failures;
+        view = view.child(
+            div()
+                .h_flex()
+                .gap_3()
+                .child(
+                    Button::new("history-prev")
+                        .label("上一页")
+                        .disabled(page == 0)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let (requests, failures) = if errors {
+                                (this.request_page, (this.failure_page - 1).max(0))
+                            } else {
+                                ((this.request_page - 1).max(0), this.failure_page)
+                            };
+                            this.send(Command::HistoryPage { requests, failures }, cx);
+                        })),
+                )
+                .child(format!(
+                    "第 {} / {} 页 · 每页 100 条",
+                    page + 1,
+                    ((total + 99) / 100).max(1)
+                ))
+                .child(
+                    Button::new("history-next")
+                        .label("下一页")
+                        .disabled((page + 1) * 100 >= total)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let (requests, failures) = if errors {
+                                (this.request_page, this.failure_page + 1)
+                            } else {
+                                (this.request_page + 1, this.failure_page)
+                            };
+                            this.send(Command::HistoryPage { requests, failures }, cx);
+                        })),
                 ),
-                format!("{} · {}", record.route, record.id),
-            ));
-        }
+        );
         view.into_any_element()
     }
     fn models(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut content = div().v_flex().gap_4().child(self.title("仅显示当前账号返回的模型，不预置虚构名称。"))
             .child(Button::new("refresh-models").primary().label("读取模型目录").disabled(self.busy || !self.codex_connected)
                 .on_click(cx.listener(|this, _, _, cx| { this.busy = true; this.send(Command::RefreshModels, cx); })))
-            .child(Self::panel("测试说明", "点击“测试文本”会发送固定短提示并使用账号额度。目录、每次测试结果和时间按账号保存到本地，重启后恢复。"))
+            .child(self.panel("测试说明", "点击“测试文本”会发送固定短提示并使用账号额度。目录、每次测试结果和时间按账号保存到本地，重启后恢复。"))
             .child(format!("目录获取时间：{}",format_time(self.models_checked_at)));
         if self.models.is_empty() {
-            content = content.child(Self::panel(
+            content = content.child(self.panel(
                 "尚无模型目录",
                 "先连接账号，再读取模型目录。目录失败时查看底部状态信息。",
             ));
@@ -588,7 +1080,7 @@ impl Desktop {
                     .gap_4()
                     .p_4()
                     .border_b_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(self.colors.border))
                     .child(
                         div()
                             .v_flex()
@@ -598,11 +1090,11 @@ impl Desktop {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(theme::MUTED))
+                                    .text_color(rgb(self.colors.muted))
                                     .child(model.slug.clone()),
                             )
                             .child(
-                                div().text_sm().text_color(rgb(theme::MUTED)).child(
+                                div().text_sm().text_color(rgb(self.colors.muted)).child(
                                     self.tests
                                         .iter()
                                         .find(|t| t.model_id == model.slug)
@@ -630,7 +1122,7 @@ impl Desktop {
             );
         }
         if let Some(result) = &self.test_result {
-            content = content.child(Self::panel("本次测试结果", result.clone()));
+            content = content.child(self.panel("本次测试结果", result.clone()));
         }
         if !self.tests.is_empty() {
             content = content.child(div().mt_4().text_lg().child("本地测试记录（最近 100 条）"));
@@ -642,7 +1134,7 @@ impl Desktop {
                 .or(test.error.as_deref())
                 .unwrap_or("测试进行中");
             let preview = body.chars().take(4096).collect::<String>();
-            content = content.child(Self::panel(
+            content = content.child(self.panel(
                 format!(
                     "{} · {} · {}",
                     test.model_id,
@@ -701,7 +1193,7 @@ impl Desktop {
                         .p_5()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(theme::WARNING))
+                        .border_color(rgb(self.colors.warning))
                         .child("密钥已加密保存 · 两分钟后隐藏，可随时再次查看或复制")
                         .child(
                             div()
@@ -735,7 +1227,7 @@ impl Desktop {
                 );
         }
         if self.keys.is_empty() {
-            content = content.child(Self::panel(
+            content = content.child(self.panel(
                 "暂无客户端密钥",
                 "创建密钥后可供自己的设备或 Agent 接入；撤销后会删除，不再展示。",
             ));
@@ -752,18 +1244,23 @@ impl Desktop {
                     .gap_4()
                     .p_4()
                     .border_b_1()
-                    .border_color(rgb(theme::BORDER))
-                    .child(div().v_flex().gap_1().child(key.label.clone()).child(
-                        div().text_sm().text_color(rgb(theme::MUTED)).child(format!(
-                            "{}…  ·  有效 · {}",
-                            key.public_prefix,
-                            if key.recoverable {
-                                "可再次查看"
-                            } else {
-                                "旧密钥仅有摘要，无法还原"
-                            }
-                        )),
-                    ))
+                    .border_color(rgb(self.colors.border))
+                    .child(
+                        div().v_flex().gap_1().child(key.label.clone()).child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(self.colors.muted))
+                                .child(format!(
+                                    "{}…  ·  有效 · {}",
+                                    key.public_prefix,
+                                    if key.recoverable {
+                                        "可再次查看"
+                                    } else {
+                                        "旧密钥仅有摘要，无法还原"
+                                    }
+                                )),
+                        ),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("view-{id}")))
                             .label("查看")
@@ -814,25 +1311,81 @@ impl Desktop {
         }
         content.into_any_element()
     }
+    fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let appearance = div()
+            .v_flex()
+            .gap_3()
+            .p_5()
+            .rounded_lg()
+            .bg(rgb(self.colors.surface))
+            .border_1()
+            .border_color(rgb(self.colors.border))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("外观主题"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(self.colors.muted))
+                    .child("默认跟随电脑的应用主题；也可以固定使用白天或夜间模式。"),
+            )
+            .child(
+                div().h_flex().flex_wrap().gap_2().children(
+                    [
+                        (ThemePreference::System, "跟随电脑"),
+                        (ThemePreference::Light, "白天模式"),
+                        (ThemePreference::Dark, "夜间模式"),
+                    ]
+                    .into_iter()
+                    .map(|(preference, label)| {
+                        Button::new(SharedString::from(format!("theme-{}", preference.as_str())))
+                            .label(label)
+                            .when(preference == self.theme_preference, |button| {
+                                button.primary()
+                            })
+                            .disabled(!self.theme_loaded || self.theme_saving)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_theme_preference(preference, cx);
+                            }))
+                    }),
+                ),
+            )
+            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
+                if !self.theme_loaded {
+                    "正在读取主题设置…"
+                } else if self.theme_saving {
+                    "正在保存主题设置…"
+                } else if self.colors == theme::Palette::for_mode(ThemeMode::Dark) {
+                    "当前显示夜间模式 · 点击选项后生效，重启后保留选择。"
+                } else {
+                    "当前显示白天模式 · 点击选项后生效，重启后保留选择。"
+                },
+            ));
+        div().v_flex().gap_4()
+            .child(self.title("应用信息、主题与在线更新。"))
+            .child(appearance)
+            .child(self.online_updates(cx))
+            .child(self.panel("桌面与后台", "GPUI Kit 0.7.3 · Tokio · Axum 模型网关 · SQLite · 本机凭据保护 · Codex 设备码认证"))
+            .child(self.panel("窗口与网络", "打开应用时自动启动网关，沿用上次成功监听地址。需要已登录账号和有效客户端密钥；失败后可在客户端接入页重试。关闭窗口即停止网关并退出。托盘与开机自启尚未实现。"))
+            .child(self.panel("界面风格", "hashicorp · 白天与夜间配色、分层表面与明确状态。"))
+            .child(self.panel("本地数据", if cfg!(target_os="macos") { "默认 ~/.tiny-proxy。账号 Token 与可查看密钥采用 AES-256-GCM，加密密钥保存在本机钥匙串。SQLite 保存模型、测试与额度，不是全库加密；只复制数据库不能迁移凭据。额度每小时查询，退出暂停。" } else { "默认 %USERPROFILE%/.tiny-proxy。首次启动复制旧目录历史数据并保留原库。账号 Token 与可查看密钥使用 DPAPI，模型、测试与额度保存在 SQLite，不是全库加密。额度每小时查询，退出暂停。" }))
+            .into_any_element()
+    }
 }
 
 impl Render for Desktop {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.page {
-            0 => self.overview(cx), 1 => self.accounts(cx), 2 => self.models(cx), 3 => self.clients(cx),
-            4 => self.requests(),
-            _ => div().v_flex().gap_4().child(self.title("Tiny Proxy 0.1.0 · Codex 网关开发版"))
-                .child(Self::panel("桌面与后台", "GPUI Kit 0.7.3 · Tokio · Axum 模型网关 · SQLite · Windows 用户级 DPAPI · Codex 设备码认证"))
-                .child(Self::panel("窗口与网络", "打开应用时自动启动网关，沿用上次成功监听地址。需要已登录账号和有效客户端密钥；失败后可在客户端接入页重试。关闭窗口即停止网关并退出。托盘与开机自启尚未实现。"))
-                .child(Self::panel("界面风格", "hashicorp · 黑色画布、分层表面与明确状态。核心服务不依赖 UI，未引入 Web 前端。"))
-                .child(Self::panel("本地数据", "默认保存在 %USERPROFILE%/.tiny-proxy。首次启动自动复制旧目录中的历史数据，保留原库。账号 Token 与可查看密钥使用用户级 DPAPI 加密；模型目录、测试结果与时间、额度快照保存在 SQLite。不是全库加密。额度每小时查询，退出应用后暂停。"))
-                .into_any_element(),
+            0 => self.overview(cx),
+            1 => self.accounts(cx),
+            2 => self.models(cx),
+            3 => self.clients(cx),
+            4 => self.requests(cx),
+            _ => self.settings(cx),
         };
         div()
             .h_flex()
             .size_full()
-            .bg(rgb(theme::CANVAS))
-            .text_color(rgb(theme::INK))
+            .bg(rgb(self.colors.canvas))
+            .text_color(rgb(self.colors.ink))
             .text_sm()
             .child(
                 div()
@@ -841,7 +1394,7 @@ impl Render for Desktop {
                     .h_full()
                     .flex_shrink_0()
                     .border_r_1()
-                    .border_color(rgb(theme::BORDER))
+                    .border_color(rgb(self.colors.border))
                     .p_4()
                     .gap_2()
                     .child(
@@ -855,7 +1408,7 @@ impl Render for Desktop {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(theme::MUTED))
+                            .text_color(rgb(self.colors.muted))
                             .mb_6()
                             .child("个人模型网关"),
                     )
@@ -872,7 +1425,16 @@ impl Render for Desktop {
                             }))
                     }))
                     .child(div().flex_1())
-                    .child(div().text_xs().text_color(rgb(theme::WARNING)).child(
+                    .when_some(self.update_sidebar_label(), |column, label| {
+                        column.child(Button::new("update-notice").label(label).w_full().on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.page = 5;
+                                this.update_notice = None;
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .child(div().text_xs().text_color(rgb(self.colors.warning)).child(
                         if self.gateway_address.is_some() {
                             "网关运行中 · Codex"
                         } else {
@@ -899,12 +1461,12 @@ impl Render for Desktop {
                             .px_6()
                             .py_3()
                             .border_t_1()
-                            .border_color(rgb(theme::BORDER))
+                            .border_color(rgb(self.colors.border))
                             .text_sm()
                             .text_color(rgb(if self.error {
-                                theme::ERROR
+                                self.colors.error
                             } else {
-                                theme::MUTED
+                                self.colors.muted
                             }))
                             .child(self.status.clone()),
                     ),
@@ -917,7 +1479,7 @@ pub fn run(commands: mpsc::Sender<Command>, events: mpsc::Receiver<Event>) {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            theme::apply(cx);
+            theme::apply(ThemePreference::default(), cx.window_appearance(), cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -942,6 +1504,136 @@ pub fn run(commands: mpsc::Sender<Command>, events: mpsc::Receiver<Event>) {
             .expect("Tiny Proxy window could not be opened");
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod request_detail_tests {
+    use super::{FailureRecord, Record, request_detail_lines};
+
+    fn record() -> Record {
+        Record::new(
+            "request-fixture".into(),
+            "POST".into(),
+            "/v1/chat/completions".into(),
+            1_000,
+        )
+    }
+
+    #[test]
+    fn failed_request_details_include_413_and_visible_diagnostics() {
+        // Historical failures remain readable after the request limit changes.
+        let mut record = record();
+        record.outcome = "failed".into();
+        record.phase = "reading_request".into();
+        record.ended_at = Some(1_010);
+        record.elapsed_ms = 10;
+        record.http_status = Some(413);
+        record.key_id = Some("key-fixture".into());
+        record.account_id = Some("account-fixture".into());
+        let failure = FailureRecord {
+            request_id: record.id.clone(),
+            occurred_at: 1_010,
+            phase: "reading_request".into(),
+            code: "invalid_request".into(),
+            message: "请求 JSON 无效或超过 2 MiB".into(),
+            http_status: 413,
+        };
+        let lines = request_detail_lines(&record, Some(&failure));
+        let text = lines.join("\n");
+        for expected in [
+            "POST /v1/chat/completions · 模型 未提供 · 失败",
+            "耗时 0.01 秒",
+            "结束阶段：读取客户端请求",
+            "首批上游数据：尚未收到 · 首个输出：尚未收到",
+            "最近上游活动：未提供",
+            "HTTP：413 · 上游 HTTP：未提供",
+            "流式：未提供 · 请求大小：未提供 字节 · 消息/输入项：未提供 · 工具定义：未提供",
+            "输入/输出 tokens：未提供 / 未提供",
+            "密钥 ID：key-fixture",
+            "账号 ID：account-fixture",
+            "请求 ID：request-fixture",
+            "异常代码：invalid_request",
+            "异常原因：请求 JSON 无效或超过 2 MiB",
+            "异常阶段：读取客户端请求 · 异常 HTTP：413",
+        ] {
+            assert!(text.contains(expected), "missing detail: {expected}");
+        }
+        assert!(lines.iter().any(|line| line.starts_with("开始：")));
+        assert!(lines.iter().any(|line| line.starts_with("结束：")));
+        assert!(lines.iter().any(|line| line.starts_with("异常时间：")));
+    }
+
+    #[test]
+    fn completed_request_details_preserve_known_metadata_and_zero_values() {
+        let mut record = record();
+        record.model = "model-fixture".into();
+        record.outcome = "completed".into();
+        record.phase = "finished".into();
+        record.ended_at = Some(3_500);
+        record.elapsed_ms = 2_500;
+        record.first_byte_at = Some(1_250);
+        record.first_output_at = Some(1_500);
+        record.last_activity_at = Some(3_500);
+        record.http_status = Some(200);
+        record.upstream_status = Some(200);
+        record.stream = Some(false);
+        record.body_bytes = Some(512);
+        record.message_count = Some(2);
+        record.tool_count = Some(0);
+        record.input_tokens = Some(100);
+        record.output_tokens = Some(0);
+        let text = request_detail_lines(&record, None).join("\n");
+        for expected in [
+            "模型 model-fixture · 完成",
+            "耗时 2.50 秒",
+            "结束阶段：已结束",
+            "首批上游数据：0.25 秒 · 首个输出：0.50 秒",
+            "HTTP：200 · 上游 HTTP：200",
+            "流式：否 · 请求大小：512 字节 · 消息/输入项：2 · 工具定义：0",
+            "输入/输出 tokens：100 / 0",
+        ] {
+            assert!(text.contains(expected), "missing detail: {expected}");
+        }
+        assert!(!text.contains("最近上游活动：未提供"));
+        assert!(!text.contains("异常代码："));
+    }
+
+    #[test]
+    fn running_and_recovered_request_details_keep_time_semantics() {
+        let mut record = record();
+        record.phase = "receiving".into();
+        record.elapsed_ms = 1_500;
+        record.stream = Some(true);
+        let text = request_detail_lines(&record, None).join("\n");
+        assert!(text.contains("结束：执行中 · 耗时 1.50 秒"));
+        assert!(text.contains("当前阶段：接收上游"));
+        assert!(text.contains("HTTP：未返回"));
+        assert!(text.contains("流式：是"));
+
+        record.outcome = "interrupted".into();
+        record.ended_at = Some(60_000);
+        let text = request_detail_lines(&record, None).join("\n");
+        assert!(text.contains("恢复确认时间："));
+        assert!(text.contains("中断前已观察耗时 1.50 秒"));
+        assert!(!text.contains("结束："));
+    }
+
+    #[test]
+    fn request_details_do_not_include_another_requests_failure() {
+        let failure = FailureRecord {
+            request_id: "another-request".into(),
+            occurred_at: 1_010,
+            phase: "waiting_upstream".into(),
+            code: "upstream_timeout".into(),
+            message: "unrelated failure marker".into(),
+            http_status: 504,
+        };
+        let text = request_detail_lines(&record(), Some(&failure)).join("\n");
+        assert!(!text.contains("异常代码："));
+        assert!(!text.contains("upstream_timeout"));
+        assert!(!text.contains("unrelated failure marker"));
+        assert!(text.contains("请求 ID：request-fixture"));
+    }
 }
 
 #[cfg(test)]

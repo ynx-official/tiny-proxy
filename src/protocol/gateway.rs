@@ -108,7 +108,8 @@ fn input_image(part: &Value) -> Result<Value, Error> {
         .and_then(|prefix| prefix.strip_suffix(";base64"))
         .ok_or_else(|| invalid("image_url"))?;
     // Only inline bytes cross this boundary. Never fetch a client URL or read a
-    // local path. The HTTP layer bounds the entire JSON (including Base64) to 2 MiB.
+    // local path. Request body size is unrestricted by explicit user choice;
+    // MIME and Base64 validation still apply before forwarding.
     if !["image/png", "image/jpeg", "image/webp", "image/gif"].contains(&mime)
         || encoded.is_empty()
         || STANDARD.decode(encoded).is_err()
