@@ -139,7 +139,8 @@ mod macos {
         if !encrypt && (!input.starts_with(PREFIX) || input.len() < PREFIX.len() + 12 + 16) {
             return Err(ProtectionError);
         }
-        crypt(input, encrypt, &key(encrypt)?)
+        let key = key(encrypt)?;
+        crypt(input, encrypt, key.as_slice())
     }
     fn crypt(input: &[u8], encrypt: bool, key: &[u8]) -> Result<Vec<u8>, ProtectionError> {
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| ProtectionError)?;
