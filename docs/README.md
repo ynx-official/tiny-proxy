@@ -45,7 +45,7 @@
 | 在线更新 | [架构与凭据决定](03-architecture/adr/0005-online-update-release.md)、[构建与更新操作](05-operations/build-and-package.md)、[测试清单](04-quality/online-update-checklist.md) |
 | 发版资料 | [发版流程](06-delivery/release-process.md)、[版本总览](upgrade/README.md)、[v1.0.0 首版详情](upgrade/v1.0.0/README.md)、[v0.1.0 开发记录](upgrade/v0.1.0/README.md)、[CHANGELOG](../CHANGELOG.md) |
 
-2026-10-13 用户要求增加白天模式并默认跟随电脑；行为与配色见 [桌面视觉系统](02-design/visual-system.md#白天模式与跟随电脑)，对应 A-theme-01—A-theme-04。源码已修改，未执行编译、自动测试或桌面实机验证，待验事项见 [主题清单](04-quality/theme-checklist.md)。
+2026-10-13 用户要求增加白天模式并默认跟随电脑；行为与配色见 [桌面视觉系统](02-design/visual-system.md#白天模式与跟随电脑)，对应 A-theme-01—A-theme-04。源码阶段未执行编译或测试；首版授权后的双平台自动测试与打包结果见 [v1.0.0 验证记录](upgrade/v1.0.0/README.md#验证结果)，桌面主题实机验收仍见 [主题清单](04-quality/theme-checklist.md)。
 
 ## 评审方式
 

@@ -47,4 +47,4 @@ Release Notes 从详情提取用户可见章节，隐藏验证结果、变更依
 
 ## Actions 行为
 
-check.yml 在 push/PR 执行两平台格式、Clippy、测试、release 构建和 Python 发版工具测试。release.yml 校验资料、执行发布工具测试、构建打包并生成清单。workflow_dispatch 仅上传 artifacts；v* 标签才发布 Release。含 `-` 的标签为 prerelease，不设 latest，应用只检查最新正式版。当前工作流尚未执行。
+check.yml 在 push/PR 执行两平台格式、Clippy、测试、release 构建和 Python 发版工具测试。release.yml 校验资料、执行发布工具测试、构建打包并生成清单。workflow_dispatch 仅上传 artifacts；v* 标签才发布 Release。含 `-` 的标签为 prerelease，不设 latest，应用只检查最新正式版。实际执行状态与验证结果见 [v1.0.0 发布记录](../upgrade/v1.0.0/README.md)。

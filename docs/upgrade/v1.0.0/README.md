@@ -1,7 +1,7 @@
 # Tiny Proxy v1.0.0
 
 > 发布日期：2026-10-13
-> 状态：Approved（用户已授权首版发布，构建与发布验证进行中）
+> 状态：Approved（首版预检通过，正式发布流水线待完成）
 > 最后更新：2026-10-13
 > 关联文档：[使用与打包](../../05-operations/build-and-package.md)、[API 契约](../../03-architecture/api-contracts.md)、[验证记录](../../06-delivery/implementation-status.md)、[更新验收](../../04-quality/online-update-checklist.md)
 
@@ -55,7 +55,15 @@ Tiny Proxy 首个正式版本，为个人设备和 AI Agent 提供原生桌面 C
 
 ## 验证结果
 
-2026-10-13 首版发布流程进行中，尚未声称产物或发布成功。发布工具 Python 回归 15 项已在本机通过，后续云端检查、两平台编译和打包结果将在完成后补记。
+2026-10-13 首版预检已通过，正式发布流水线尚待完成：
+
+| 已执行验证 | 结果与证据 |
+|---|---|
+| Python 发布工具 | 本机及两平台 CI 共 15 项通过，包含中文输出编码与 macOS 完整脚本 stdout 回归。 |
+| Rust 格式 / Clippy / 完整测试 | 提交 0b79543 在两平台的对应步骤全部通过，见 [原生检查 38384871793](https://github.com/ynx-official/tiny-proxy/actions/runs/38384871793)；包含更新、凭据、续期、密钥删除、主题、记录、取消及大请求真实 HTTP 回归。 |
+| release 编译与四包 | 提交 1df005e 的 Windows x64 EXE/ZIP、macOS arm64 PKG/ZIP 均成功并上传，见 [打包预检 38383610395](https://github.com/ynx-official/tiny-proxy/actions/runs/38383610395)。版本、原生架构、Windows ProductVersion、macOS 应用结构与签名检查通过。 |
+
+已核对 1df005e 到 0b79543 的生产代码、依赖、构建和打包脚本没有变化，仅修正回归测试的 Responses 原生字符串预期及更新文档。标签工作流将重新构建、打包、生成说明和清单；公开 Release 与四包摘要核对结果在完成后补记。
 
 不停止或替换正在使用的程序。原生 UI、真实上游及实际更新安装没有在本轮运行，历史验证不能代替当前提交的回归结果。
 
@@ -64,9 +72,9 @@ Tiny Proxy 首个正式版本，为个人设备和 AI Agent 提供原生桌面 C
 - Windows 发版工具输出中文的默认编码失败：增加 UTF-8 输出与 CP1252 回归，已先失败后通过。
 - Clippy 重复导入、测试模块顺序、通知赋值格式与 GPUI 测试宏遮蔽均已修正，双平台 Clippy 已在 a80313c 的云端检查中通过。
 - Windows x64 的 release 编译、安装 EXE、便携 ZIP 与上传已在 [预检 38380205602](https://github.com/ynx-official/tiny-proxy/actions/runs/38380205602) 成功。macOS release 编译通过，打包因 stdout 混入资料提示失败；修正为诊断写 stderr，新增脚本回归先失败后通过，本机 Python 工具共 15 项通过。
-- Windows 完整测试定位到大请求提前鉴权拒绝导致的 TCP 重置，新增定长/分块、两个路由、无密钥/无效密钥的真实 HTTP 回归与拒绝体预算/关停测试。新增有界丢弃传输收尾；[预检 38383574362](https://github.com/ynx-official/tiny-proxy/actions/runs/38383574362) 的双平台真实 HTTP 鉴权回归与预算/关停测试已通过，不弱化原有 401 断言。该轮后续发现大文本转发测试错误地把 Responses 原生字符串预期写成 Chat 部件数组，修正为各协议的正确形状，仍完整比较所有文本与图片内容；重新验证中。
+- Windows 完整测试定位到大请求提前鉴权拒绝导致的 TCP 重置，新增定长/分块、两个路由、无密钥/无效密钥的真实 HTTP 回归与拒绝体预算/关停测试。新增有界丢弃传输收尾；[预检 38383574362](https://github.com/ynx-official/tiny-proxy/actions/runs/38383574362) 的双平台真实 HTTP 鉴权回归与预算/关停测试已通过，不弱化原有 401 断言。该轮后续发现大文本转发测试错误地把 Responses 原生字符串预期写成 Chat 部件数组，修正为各协议的正确形状，仍完整比较所有文本与图片内容；修正后两个平台完整测试全部通过，仍完整比较内容而非仅比较大小或放宽结果。
 - macOS CI 临时钥匙串配置共享的合成测试密钥访问，避免多个测试进程等待权限提示；该轮 macOS 账号迁移、登录、双续期测试已通过，测试仍使用真实钥匙串读写与加密实现。
-- [打包预检 38383610395](https://github.com/ynx-official/tiny-proxy/actions/runs/38383610395) 的 macOS release、ZIP/PKG 与上传已成功，Windows 仍在构建。
+- [打包预检 38383610395](https://github.com/ynx-official/tiny-proxy/actions/runs/38383610395) 的两平台 release、四种安装/便携包与上传已全部成功。
 - 本地 Rust 回归在依赖编译阶段因 D 盘空间不足失败，测试未执行；未清理工作区，继续使用云端验证。
 
 ## 变更依据

@@ -6,12 +6,12 @@
 
 ## 验证边界
 
-已补 Rust/Python 回归源码，默认不执行测试、编译、构建、打包或应用。允许格式化、脚本语法解析、资料一致性和差异检查；结果记录到 [版本详情](../upgrade/v0.1.0/README.md)，不能称为运行测试通过。
+已补 Rust/Python 回归源码，默认不执行测试、编译、构建、打包或应用。允许格式化、脚本语法解析、资料一致性和差异检查；源码阶段记录见 [开发版详情](../upgrade/v0.1.0/README.md)。用户于 2026-10-13 授权 v1.0.0 发布与重建，实际运行证据见 [首版详情](../upgrade/v1.0.0/README.md)。
 
 ## 获得对应授权后的命令
 
 ```powershell
-python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py
+python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py scripts/test_macos_packaging.py
 cargo test --locked --test updater
 cargo test --locked updater::
 cargo test --locked --test data_location --test local_security --test runtime --test application_icon
@@ -40,7 +40,7 @@ macOS 纯加密测试在 cargo test --locked --lib；真实钥匙串需可解锁
 | 手动 Actions | 两个平台 artifacts、四个应用产物，不发布 Release。 |
 | 正式/beta 标签 | 正式版四包+清单+说明；beta 为 prerelease、不为 latest；未 Approved/无日期/缺资料阻止发布。 |
 
-本机 Windows；macOS 原生界面、钥匙串、签名权限、最低系统基线与两平台真实更新往返未验证。Actions 未触发，未发布版本。
+本机 Windows；macOS 原生界面、首启权限、最低系统基线与两平台真实更新往返保持待验。CI 钥匙串测试、构建、打包与发布的实际结果见首版详情，不能代替手工验收。
 
 ## v1.0.0 发布验证追加
 

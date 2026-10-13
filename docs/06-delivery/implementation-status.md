@@ -246,3 +246,9 @@ Windows 11、Rust/Cargo 1.96.0、MSVC。命令均在 D:/study/tiny-proxy 执行�
 建立平台打包脚本、Windows版本资源与Inno标识、macOS plist/图标生成/签名检查、双平台Actions、四应用产物清单、发版校验和说明提取。保留0.1.0，CHANGELOG、总览和独立详情均标未发布，未创建或推送标签。仅创建流水线，没有触发Actions或Release。
 
 实际源码检查及限制集中在 [v0.1.0验证结果](../upgrade/v0.1.0/README.md#验证结果)。已执行Rust格式、Python/PowerShell/Bash/plist语法、依赖/资料/链接一致性与差异检查；未执行编译、Rust/Python回归、打包、原生UI、钥匙串或真实更新。本机无YAML解析器，Actions语法及runner行为未实测。回归与手工步骤见 [更新验收清单](../04-quality/online-update-checklist.md)。
+
+## v1.0.0 发布与重建验证（2026-10-13）
+
+用户明确要求“开始发第一个版本 v1.0.0”，随后要求排查打包报错并重新构建，授权本次必要测试、两平台打包及正式发布。此前各节中的未运行记录保留为当时事实；本轮双平台 Rust 格式、Clippy、完整测试及四包打包预检均已执行通过。失败原因、回归证据、构建来源与实际发布状态集中在 [首版验证记录](../upgrade/v1.0.0/README.md#验证结果)，不以历史成功代替当前结果。
+
+本机依赖编译受 D 盘空间不足影响，Rust 验证使用 GitHub Actions 原生 runner；没有清理工作区、停止或替换当前运行的应用。原生 UI、真实上游及实际安装升级仍按验收清单手工验证。
