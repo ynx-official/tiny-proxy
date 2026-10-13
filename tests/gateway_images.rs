@@ -392,7 +392,13 @@ async fn images_and_large_requests_reach_http_upstream_with_auth() {
             ),
             (
                 json!(large_text),
-                json!([{"type":"input_text","text":large_text}]),
+                // Chat content is converted into native parts; Responses
+                // already accepts a content string and preserves its shape.
+                if chat {
+                    json!([{"type":"input_text","text":large_text}])
+                } else {
+                    json!(large_text)
+                },
             ),
         ] {
             for stream in [false, true] {
@@ -446,9 +452,9 @@ async fn images_and_large_requests_reach_http_upstream_with_auth() {
                             assert_eq!(value["status"], "completed");
                         }
                     }
-                    assert_eq!(
-                        seen.lock().unwrap().last().unwrap()["input"][0]["content"],
-                        expected
+                    assert!(
+                        seen.lock().unwrap().last().unwrap()["input"][0]["content"] == expected,
+                        "complete upstream content must match, chat={chat}, stream={stream}, chunked={chunked}"
                     );
                 }
             }
