@@ -72,7 +72,7 @@ impl Desktop {
                 .child(div().text_color(rgb(self.colors.muted)).child("1–8760 小时 · 应用关闭时暂停"))))
             .child(Button::new("update-notifications").label(if preferences.notify { "新版本提醒：开启" } else { "新版本提醒：关闭" })
                 .disabled(matches!(status, UpdateStatus::Installing))
-                .on_click(cx.listener(|this,_,_,cx|{let mut prefs=this.update.preferences.clone();prefs.notify=!prefs.notify;this.send(Command::ConfigureUpdates(prefs),cx);})))
+                .on_click(cx.listener(|this,_,_,cx|{let mut prefs=this.update.preferences.clone();prefs.notify = !prefs.notify;this.send(Command::ConfigureUpdates(prefs),cx);})))
             .child(div().text_color(rgb(if matches!(status, UpdateStatus::Error(_) | UpdateStatus::DownloadFailed(..)) { self.colors.error } else { self.colors.ink })).child(status_text(status)))
             .when(downloading, |column| {
                 let fraction = if let UpdateStatus::Downloading(_,done,total)=status { if *total > 0 { (*done as f32 / *total as f32).clamp(0.,1.) } else { 0. } } else { 0. };
@@ -117,7 +117,8 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::status_text;
+    use tiny_proxy::updater::UpdateStatus;
     #[test]
     fn cancellation_installation_and_errors_have_explicit_feedback() {
         assert!(status_text(&UpdateStatus::Installing).contains("安装"));
