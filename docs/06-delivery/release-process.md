@@ -8,7 +8,7 @@
 
 沿用 ashell 的 SemVer 治理：PATCH 为兼容修复、性能、文案或内部调整；MINOR 为兼容新功能；MAJOR 为配置、数据、协议或流程不兼容。仅文档/CI/工具修改且不发产物时通常不升级版本。预发布用 beta.1、rc.1 等，每个版本均有独立标签与详情，不覆盖旧标签。
 
-Cargo.toml 的 package.version 是唯一代码来源；Cargo.lock 的 tiny-proxy 包、界面、Windows ProductVersion、macOS TinyProxyReleaseVersion 与标签保持一致。本轮保留 0.1.0，没有创建标签或发布。
+Cargo.toml 的 package.version 是唯一代码来源；Cargo.lock 的 tiny-proxy 包、界面、Windows ProductVersion、macOS TinyProxyReleaseVersion 与标签保持一致。当前版本与发布状态见 [版本总览](../upgrade/README.md)，不在规范文档中维护第二份版本状态。
 
 ## 必须同步的资料
 
