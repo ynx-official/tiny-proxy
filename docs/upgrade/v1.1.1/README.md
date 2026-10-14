@@ -46,7 +46,11 @@
 
 用户于 2026-10-14 明确要求“正式发版跳过测试”，授权本次版本准备、提交推送、构建打包、新标签与正式发布。仅本版的 Rust 单元/集成及 Python 发布工具测试跳过；Clippy 会编译测试代码但不运行测试。后续无 skip 标记版本恢复默认测试。
 
-源码阶段已执行 cargo fmt 和差异/文档文件链接检查。本机 `cargo +1.96.0 clippy --all-targets --locked -- -D warnings` 已通过，测试代码仅编译、未执行；检查时修正了参数转换函数与上游终态校验共用导致的编译问题，并保留 completed 工具参数完整性检查，相关回归已补充但未运行。双平台构建、四包打包与公开清单校验尚待 CI 完成后按真实结果补记。未启动新版、访问真实账号额度、操作真实数据库或安装运行中的程序。
+源码阶段已执行 cargo fmt 和差异/文档文件链接检查。本机 `cargo +1.96.0 clippy --all-targets --locked -- -D warnings` 已通过，测试代码仅编译、未执行；检查时修正了参数转换函数与上游终态校验共用导致的编译问题，并保留 completed 工具参数完整性检查，相关回归已补充但未运行。
+
+发布前对提交 968e2a284f94e1da3809b2ae7496d99aeae5a49e 执行的 [Native checks](https://github.com/ynx-official/tiny-proxy/actions/runs/38515196062) 已成功：Windows x64/macOS arm64 的格式检查、Clippy、release 构建均通过；Rust/Python 测试步骤均显示 skipped。[Release 手动预检](https://github.com/ynx-official/tiny-proxy/actions/runs/38515197088) 已成功：版本/锁文件/文档校验、双平台构建和四包打包上传通过，发布工具测试 skipped；手动任务未发布 Release。正式标签发布与公开清单校验待完成后补记。
+
+未启动新版、访问真实账号额度、操作真实数据库或安装运行中的程序。
 
 ## 变更依据
 
