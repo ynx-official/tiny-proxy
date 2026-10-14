@@ -1,7 +1,7 @@
 # 版本管理与发版流程
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14
 关联文档：[ADR 0005](../03-architecture/adr/0005-online-update-release.md)、[打包操作](../05-operations/build-and-package.md)、[版本总览](../upgrade/README.md)、[验收](../04-quality/online-update-checklist.md)
 
 ## 版本级别与唯一来源
@@ -43,8 +43,8 @@ Release Notes 从详情提取用户可见章节，隐藏验证结果、变更依
 6. 仅在用户明确授权 Git 操作与发布后提交、创建并推送新标签。此文档不构成自动提交或正式发布授权。
 7. 发布后核对四个应用产物、release-notes.md、update-manifest.json 的版本、大小、URL、SHA-256，完成真实更新往返并记录证据。
 
-已公开标签不得复用。发布失败保留记录，按影响建立新的 PATCH 版本。单版本详情只有经用户明确要求才能加入 `> 发布测试策略：skip`，仅跳过该版本发布工具测试，资料/构建/打包/清单仍检查；后续无标记版本恢复默认测试。
+已公开标签不得复用。发布失败保留记录，按影响建立新的 PATCH 版本。单版本详情只有经用户明确要求才能加入 `> 发布测试策略：skip`，跳过该版本 Rust 单元/集成与 Python 发布工具测试，Native checks 和 Release 同时识别；格式/Clippy/资料/构建/打包/清单仍检查；后续无标记版本恢复默认测试。
 
 ## Actions 行为
 
-check.yml 在 push/PR 执行两平台格式、Clippy、测试、release 构建和 Python 发版工具测试。release.yml 校验资料、执行发布工具测试、构建打包并生成清单。workflow_dispatch 仅上传 artifacts；v* 标签才发布 Release。含 `-` 的标签为 prerelease，不设 latest，应用只检查最新正式版。实际执行状态与验证结果见 [v1.0.0 发布记录](../upgrade/v1.0.0/README.md)。
+check.yml 在 push/PR 执行两平台格式、Clippy、测试、release 构建和 Python 发版工具测试。release.yml 校验资料、执行发布工具测试、构建打包并生成清单。workflow_dispatch 仅上传 artifacts；v* 标签才发布 Release。含 `-` 的标签为 prerelease，不设 latest，应用只检查最新正式版。实际执行状态与验证结果见 [版本总览](../upgrade/README.md)。

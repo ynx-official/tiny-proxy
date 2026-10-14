@@ -38,8 +38,8 @@ jobs:
             python scripts/release_notes.py --check-current
           fi
           VERSION_TAG="v$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
-          SKIP_TESTS=false
-          if grep -Fxq '> 发布测试策略：skip' "docs/upgrade/$VERSION_TAG/README.md"; then SKIP_TESTS=true; fi
+          # Python normalizes LF/CRLF so Windows also honors this version's policy.
+          SKIP_TESTS="$(python -c 'from pathlib import Path; import sys; print("true" if "> 发布测试策略：skip" in (Path("docs/upgrade") / sys.argv[1] / "README.md").read_text(encoding="utf-8").splitlines() else "false")' "$VERSION_TAG")"
           echo "skip_tests=$SKIP_TESTS" >> "$GITHUB_OUTPUT"
       - name: Test release tooling
         if: steps.metadata.outputs.skip_tests != 'true'

@@ -36,14 +36,23 @@ jobs:
         with:
           shared-key: ${{ matrix.target }}
           cache-on-failure: true
-      - name: Validate release metadata and tooling
+      - name: Validate release metadata and test policy
+        id: metadata
         shell: bash
         run: |
           set -euo pipefail
           python scripts/release_notes.py --check-current
+          VERSION_TAG="v$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          # Python normalizes LF/CRLF so Windows also honors this version's policy.
+          SKIP_TESTS="$(python -c 'from pathlib import Path; import sys; print("true" if "> 发布测试策略：skip" in (Path("docs/upgrade") / sys.argv[1] / "README.md").read_text(encoding="utf-8").splitlines() else "false")' "$VERSION_TAG")"
+          echo "skip_tests=$SKIP_TESTS" >> "$GITHUB_OUTPUT"
+      - name: Test release tooling
+        if: steps.metadata.outputs.skip_tests != 'true'
+        shell: bash
+        run: |
           python -m unittest scripts/test_release_notes.py scripts/test_update_manifest.py scripts/test_release_contract.py scripts/test_macos_packaging.py
       - name: Use a temporary keychain for macOS credential tests
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.metadata.outputs.skip_tests != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -64,5 +73,6 @@ jobs:
       - run: cargo +1.96.0 fmt --all -- --check
       - run: cargo +1.96.0 clippy --all-targets --locked -- -D warnings
       - run: cargo +1.96.0 test --all-targets --locked
+        if: steps.metadata.outputs.skip_tests != 'true'
         timeout-minutes: 15
       - run: cargo +1.96.0 build --release --locked --target ${{ matrix.target }} --bin tiny-proxy
