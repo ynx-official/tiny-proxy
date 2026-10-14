@@ -31,7 +31,7 @@ Tiny Proxy 是供个人在不同设备和 Agent 中使用的原生桌面 Codex �
 
 🔒 **本地凭据保护** — OAuth 凭据与新网关密钥使用 Windows 用户级 DPAPI；外部客户端只持有网关密钥。
 
-🔄 **在线更新与双平台发版** — 已移植 ashell 的检查、校验、下载与安装重启流程；发布配置仅 Windows x64 和 macOS arm64，各有安装包与便携包。v1.0.0 已完成两平台原生构建与四包发布，实际安装升级仍待验。
+🔄 **在线更新与双平台发版** — 已移植 ashell 的检查、校验、下载与安装重启流程；发布配置仅 Windows x64 和 macOS arm64，各有安装包与便携包。v1.1.1 已完成两平台原生构建与四包发布，按要求跳过本版测试，实际安装升级仍待验。
 
 ## 🌻 为什么做 Tiny Proxy
 
@@ -176,7 +176,7 @@ OAuth Token 仅由本机用于固定 Codex 上游。外部客户端不能管理�
 
 ## 🛠️ 开发与验证
 
-设置 → 在线更新，支持启动/定时/关闭自动检查、更新说明、下载进度与取消重试。只有手动确认才安装并重启。GitHub 手动工作流只上传产物，版本标签才发布 Release；详见 [构建与更新](docs/05-operations/build-and-package.md)、[发版流程](docs/06-delivery/release-process.md)和 [版本总览](docs/upgrade/README.md)。[v1.0.0 已正式发布，可直接下载](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.0.0)，包含 Windows x64 的安装 EXE/便携 ZIP 和 macOS arm64 的安装 PKG/便携 ZIP。清单与四包的 GitHub SHA-256 已核对一致，实际结果见 [首版验证记录](docs/upgrade/v1.0.0/README.md#验证结果)。
+设置 → 在线更新，支持启动/定时/关闭自动检查、更新说明、下载进度与取消重试。只有手动确认才安装并重启。GitHub 手动工作流只上传产物，版本标签才发布 Release；详见 [构建与更新](docs/05-operations/build-and-package.md)、[发版流程](docs/06-delivery/release-process.md)和 [版本总览](docs/upgrade/README.md)。[v1.1.1 已正式发布，可直接下载](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.1.1)，包含 Windows x64 的安装 EXE/便携 ZIP 和 macOS arm64 的安装 PKG/便携 ZIP。四包下载后的 SHA-256 与清单、GitHub 记录均一致；本版按要求跳过测试，实际结果见 [v1.1.1 验证记录](docs/upgrade/v1.1.1/README.md#验证结果)。
 
 技术栈：**Rust · GPUI · GPUI Kit · Tokio · Axum · SQLite**。采用单进程、单 Cargo package 内部分模块，UI 通过应用服务访问网络与存储。
 

@@ -48,14 +48,16 @@
 
 源码阶段已执行 cargo fmt 和差异/文档文件链接检查。本机 `cargo +1.96.0 clippy --all-targets --locked -- -D warnings` 已通过，测试代码仅编译、未执行；检查时修正了参数转换函数与上游终态校验共用导致的编译问题，并保留 completed 工具参数完整性检查，相关回归已补充但未运行。
 
-发布前对提交 968e2a284f94e1da3809b2ae7496d99aeae5a49e 执行的 [Native checks](https://github.com/ynx-official/tiny-proxy/actions/runs/38515196062) 已成功：Windows x64/macOS arm64 的格式检查、Clippy、release 构建均通过；Rust/Python 测试步骤均显示 skipped。[Release 手动预检](https://github.com/ynx-official/tiny-proxy/actions/runs/38515197088) 已成功：版本/锁文件/文档校验、双平台构建和四包打包上传通过，发布工具测试 skipped；手动任务未发布 Release。正式标签发布与公开清单校验待完成后补记。
+发布前对提交 968e2a284f94e1da3809b2ae7496d99aeae5a49e 执行的 [Native checks](https://github.com/ynx-official/tiny-proxy/actions/runs/38515196062) 已成功：Windows x64/macOS arm64 的格式检查、Clippy、release 构建均通过；Rust/Python 测试步骤均显示 skipped。[Release 手动预检](https://github.com/ynx-official/tiny-proxy/actions/runs/38515197088) 已成功：版本/锁文件/文档校验、双平台构建和四包打包上传通过，发布工具测试 skipped；手动任务未发布 Release。
 
-未启动新版、访问真实账号额度、操作真实数据库或安装运行中的程序。
+正式标签 v1.1.1 指向 e529389f078a98f09546bba152167f41e9d356b1；该提交仅补记预检文档，源码、依赖、资源与发布脚本和上述预检一致。[标签 Native checks](https://github.com/ynx-official/tiny-proxy/actions/runs/38516549909) 的双平台格式、Clippy、release 构建通过，Rust/Python 测试均 skipped。[正式 Release](https://github.com/ynx-official/tiny-proxy/actions/runs/38516549764) 的资料校验、双平台构建、四包打包、清单生成与上传成功，发布工具测试 skipped。
+
+[v1.1.1](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.1.1) 于 2026-10-14 13:38:46（北京时间）公开发布，非 Draft/Prerelease，并确认为 latest。公开资产为四个应用包、release-notes.md 和 update-manifest.json；已核对清单版本、全部资产名称/大小/URL/服务端 SHA-256，并下载六个公开文件核对 SHA-256。Windows 便携 EXE 的 ProductVersion/FileVersion 为 1.1.1、PE 为 x64/GUI 子系统；macOS 便携包的 plist 版本为 1.1.1、可执行文件为 arm64 Mach-O。文件仅下载、读取或解压，未进行本机新版界面/安装/更新往返验收，未访问真实账号额度或操作真实数据库，未停止或替换正在运行的应用。
 
 ## 变更依据
 
 最近真实祖先正式版本为 v1.1.0，发布提交为 f6f098d67b980c6653953c66940b63dce355d8f9。相较该提交，本版的兼容转换与诊断修复来自本次已授权的工作区差异，未包含其他发布线或虚构提交；按兼容修复递增 PATCH 为 1.1.1。
 
-新标签为 v1.1.1，不复用或覆盖 v1.1.0。[v1.1.0...v1.1.1](https://github.com/ynx-official/tiny-proxy/compare/v1.1.0...v1.1.1) 在标签推送后提供本版变更依据。
+新标签为 v1.1.1，不复用或覆盖 v1.1.0。[v1.1.0...v1.1.1](https://github.com/ynx-official/tiny-proxy/compare/v1.1.0...v1.1.1) 提供本版变更依据。
 
 [返回版本总览](../README.md)
