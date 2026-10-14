@@ -88,7 +88,7 @@ codex_session 是单行活动 Codex 会话：singleton_id=1、encrypted_blob、g
 批准范围及时间/保留语义见 [请求诊断](../05-operations/request-diagnostics.md)。迁移只增加两个表与时间索引，不修改旧迁移，不包含正文列，也不迁移真实数据目录。
 
 - request_records：id、method、route、model、key_id、account_id、stream、body_bytes、message_count、tool_count、outcome、phase、http_status、upstream_status、started_at、ended_at、elapsed_ms、first_byte_at、first_output_at、last_activity_at、input_tokens、output_tokens。
-- failure_records：request_id、occurred_at、phase、code、message、http_status；request_id 唯一外键，清理请求时级联删除异常。message 仅为网关固定安全文案。
+- failure_records：request_id、occurred_at、phase、code、message、http_status；request_id 唯一外键，清理请求时级联删除异常。message 仅为网关生成的安全文案。2026-10-14 按用户反馈细化为代码内列举的协议字段路径、数组索引及固定规则/建议，随后用户要求默认信任字段，未知扩展不再生成本地异常，只保留必要转换错误的代码字段路径；不含请求值，规则见 [本地参数诊断](api-contracts.md#本地参数校验诊断2026-10-14)。无需迁移，不补写旧异常。
 - 所有请求时间用 UTC 毫秒；不改变其他表原有 UTC 秒字段。运行中 ended_at 为 NULL。正常耗时使用 Instant；中断恢复保留最近检查点耗时，ended_at 是恢复确认时间。
 - key_id/account_id 是历史关联值，不向账号和 Key 表建立级联外键；删除 Key 不删除请求历史。元数据为普通 SQLite 字段，不是 DPAPI 或全库加密。
 - 结束结果与异常同事务，检查点/重复结束仅更新 ended_at IS NULL 的记录，不能覆盖终态；持久化失败计数并提示。

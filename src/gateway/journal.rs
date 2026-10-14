@@ -17,7 +17,7 @@ pub fn now_ms() -> i64 {
 #[derive(Clone, Debug)]
 pub struct FailureInfo {
     pub code: &'static str,
-    pub message: &'static str,
+    pub message: String,
     pub status: u16,
 }
 impl FailureInfo {
@@ -48,7 +48,7 @@ impl FailureInfo {
         };
         Self {
             code,
-            message,
+            message: message.into(),
             status,
         }
     }
@@ -203,7 +203,8 @@ impl Trace {
                 .as_array()
                 .or_else(|| body["input"].as_array())
                 .map(|a| a.len() as i64)
-                .or_else(|| body["input"].as_str().map(|_| 1));
+                .or_else(|| body["input"].as_str().map(|_| 1))
+                .or_else(|| body["input"].is_object().then_some(1));
             r.tool_count = Some(body["tools"].as_array().map_or(0, |a| a.len() as i64));
         });
     }
@@ -269,7 +270,7 @@ impl Trace {
             occurred_at: record.ended_at.unwrap(),
             phase: record.phase.clone(),
             code: e.code.into(),
-            message: e.message.into(),
+            message: e.message,
             http_status: e.status.into(),
         });
         Some((record.clone(), error))

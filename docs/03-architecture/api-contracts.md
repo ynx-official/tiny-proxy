@@ -1,7 +1,8 @@
 # 模型 API 契约
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14
+
 关联文档：[流式转换](streaming-protocol.md)、[规则](../01-requirements/business-rules.md)、[验收](../01-requirements/acceptance/mvp.md)
 
 ## 地址与鉴权
@@ -25,103 +26,84 @@ UI 管理通过进程内命令完成，网络上没有 /admin、登录、账号�
 
 模型 ID 初版直接使用上游可见 ID，不用硬编码的虚构模型或自动别名。上游缺少模型创建时间时，目录的 created=0 仅作为“未知”的协议占位，UI 显示未知；不把抓取时间冒充模型创建时间。owned_by 使用明确的来源标识，不推断账号权限。客户端选择必须以实际返回列表为准，账号切换后清除旧目录的活动可见性。
 
+## 默认信任下游字段（2026-10-14）
+
+用户明确要求“把请求的校验放松一点，不对下游传过来的字段进行严格校验，默认信任”。本节替代此前字段白名单、类型/枚举/范围、工具配对及元数据位置的严格规则；历史依据保留在 [严格校验快照](../99-archive/api-contracts-strict-validation-2026-10-14.md)，验收 A17/A17a/A17b/A17d/A17f/A17h、A55/A56 已同步更新，新增 A58。
+
+- 不再因未知字段（包括 null）返回本地 400。网关仅提取可映射的顶层选项，未知或用不到的顶层字段跳过；Chat 消息/内容/调用中的扩展元数据不进入提示词。Responses 原生输入及函数定义内部的扩展字段保留，语义由上游判断。
+- 本地仅要求能读取 JSON 对象、非空字符串 model，以及协议转换所需的消息/输入结构、文本、函数名和调用 ID。错误保留具体位置与安全建议。已登录账号、独立网关密钥、固定上游、模型目录与请求生命周期仍按现有规则处理。
+- 不校验采样/长度参数的类型或范围，不校验工具名称字符/长度、128 项工具数量上限、重复调用 ID、历史配对、参数 JSON 内容或推理状态枚举。Chat 参数字符串原样保留；非字符串参数序列化为 JSON 字符串，缺省为 `{}`；Responses 原生参数不重新解释。
+- 不新增托管工具执行或 Agent 循环，定义仍转换为 function；缺少转换所需的函数名/对象仍报错。图像继续走既有 user Base64 入口，不抓取 URL 或读取本地文件。
+- 本地接收与上游支持是两件事。可直接映射的非法或新值交给上游判断，真实上游拒绝不改写为成功；SSE/终态、断流、鉴权、撤销和取消的检查保持。
+- `X-Tiny-Proxy-Ignored-Parameters` 仅使用固定的已知字段名；未知扩展名及参数值不进入响应提示头、异常表或日志。已知选项被跳过时附提示，未知扩展默认跳过。
+
 ## Chat Completions 请求
 
-| 字段/内容 | 首版处理 |
+| 字段/内容 | 处理 |
 |---|---|
-| model、messages | 必填；model 必须在当前可用目录；messages 为完整历史 |
-| stream | 默认 false；true 返回 SSE；false 由网关聚合上游流 |
-| user/assistant 文本 | 接受字符串、兼容文本块数组；保留消息顺序 |
-| user 图片 | 接受 image_url 块的 Base64 data URL，转换为 input_image；保留图文顺序及 detail，详见下述规则 |
-| 前置 system 或 developer 文本 | 按原顺序转入上游 instructions；同一请求混合两种指令层级、或中途插入指令，先返回不支持，避免悄悄改变优先级 |
-| assistant.tool_calls | 保留 function 名、ID、JSON 参数字符串；content 可为 null |
-| assistant.reasoning_content | 兼容接收字符串或 null；不传给 Codex、不拼入正文/指令；非空字符串通过响应头提示未回放，详见下述规则 |
-| role=tool | tool_call_id 必须能对应历史中的调用；输出以文本传回 |
-| tools | function 类型与 JSON Schema 参数；保留描述和 strict 语义，不能悄悄改变 strict |
-| tool_choice | 计划支持 auto、none、required、指定函数；采用 Codex 平铺 function 定义转换，P0/P3 必须验证；未通过的能力明确拒绝 |
-| parallel_tool_calls | 按能力校验后保留；响应端始终能区分交错工具事件 |
-| n | 省略或 1；其他值 400 |
-| stream_options.include_usage | true 时在终止块后、[DONE] 前发送 usage 块；无统计则不伪造数值 |
-| reasoning_effort | 仅接受选定模型声明且实测支持的值 |
-| store | 省略或 false；true 返回不支持 |
-| max_tokens、max_completion_tokens | 接受正整数（u64 范围）或 null；正整数不传给 Codex、不执行输出上限，通过兼容响应头提示；两个字段同时存在时逐个校验并列出；null 等同未设置 |
-| temperature、top_p、stop、seed、logprobs、response_format 等 | 非空值严格拒绝；已列明的 null 占位按下述客户端历史与空值规则处理 |
-| 非用户消息图片、远程图片 URL、音频、文件、旧 functions/function_call | 返回不支持内容或字段 |
-
-空值与缺省按字段 schema 区分。未知字段默认 400，返回字段名；有证据需要兼容某客户端时，只能新增有文档和测试的允许规则。
-
-Trae 文档确认自定义模型可使用 Chat Completions，支持 Base URL 或完整 URL；但其预设可能自动增加参数，必须记录实际客户端版本并验证。[Trae 模型配置](https://docs.trae.cn/ide_models)
-
-如果 Trae 必填字段与上游能力冲突，先尝试客户端支持的配置；仍无法消除时记录阻塞并评审具体降级规则，不把静默丢参作为默认实现。
+| model、messages | model 为非空字符串且在当前模型目录；messages 必须是数组，可为空；每条消息需有可转换的对象/role，空输入由上游判断 |
+| stream | 默认 false；接受 bool、字符串 true/false/1/0 和整数 1/0；无法识别的可选值使用默认值 |
+| user/assistant 文本 | 字符串或带字符串 text 的内容块；额外字段与文本块类型元数据不严格校验；保持正文顺序 |
+| user 图片 | 接受 image_url 包装对象或直接 Base64 字符串，以及 input_image 形式；继续按下述图片规则转换 |
+| system/developer | 所有前置指令按顺序合并为 instructions，允许混用；中途指令作为原位置的原生消息保留 |
+| assistant.tool_calls | 数组中的调用 ID、function 对象和函数名须可转换；保留调用顺序，忽略 index 和多余元数据；不检查 ID 唯一性或结果配对 |
+| reasoning_content、name、audio、annotations、旧 function_call 等 | 按上下文作为元数据跳过，不校验值类型/角色；assistant 非空 reasoning_content 用响应头提示未回放 |
+| assistant.refusal | 字符串保留为拒绝内容；其他类型跳过，不拒绝整条请求 |
+| role=tool | 非空字符串 tool_call_id 用于转换；不要求在同一历史中找到匹配调用，不检查冗余 name；输出转换为文本 |
+| tools | 定义数组，读取函数名和定义对象，规范化为 function；缺省 parameters 补无参数 schema，现有 parameters/description/strict 值与扩展字段交给上游 |
+| tool_choice | 字符串/原生选择值直接传递；Chat function.name 包装转换为平铺选择；不校验枚举或名称是否在 tools 中 |
+| parallel_tool_calls | 同 stream 的宽容布尔解析；不识别的值使用 false |
+| stream_options.include_usage | 同上宽容解析；仅 stream=true 时使用，无统计不伪造数值，JSON 请求带此选项不报错 |
+| reasoning_effort | 作为 reasoning.effort 发送，不按本地模型目录枚举拒绝；summary 默认 auto |
+| n、store | 接收任意值，仍只返回一个结果，上游强制 store=false；与网关固定行为不同的非空值通过响应头提示 |
+| max_tokens、max_completion_tokens、max_output_tokens | 任意非空值接收后跳过，不发送上游、不模拟输出上限，按固定字段名提示 |
+| temperature、top_p、stop、seed、logprobs、response_format 等 | 接收后跳过，非空值通过固定响应头提示；未知扩展直接跳过 |
 
 ## Responses 请求
 
-- 接受 model、input（字符串可规范化为文本数组）、instructions、stream、支持范围内的 tools/tool_choice、reasoning、include、parallel_tool_calls。
-- 外部 stream=false 可用，由网关聚合；上游始终使用该路线要求的流式模式。
-- max_output_tokens 按下述兼容规则接收正整数（u64 范围）或 null，不传给 Codex、不执行输出上限。
-- store 默认按 false 处理，显式 true 拒绝；无服务端会话保存。
-- 历史由客户端完整带入，包括已返回的工具调用、工具结果及允许的 reasoning 回放项。
-- user 消息 content 数组支持 input_image，接受 Base64 data URL；规则与 Chat 共用，图片内容不会转换成文本。
-- 不接受 previous_response_id、conversation、background、WebSocket、托管工具或客户端指定上游地址。
-- function tools 使用参考 Codex 上游的平铺形式，保留名称、参数字符串与 strict；当前不支持 namespace/custom/托管工具。
-- 非流式返回真实终态 Response 对象；不把 incomplete 或 failed 写成 completed。
-- 原生流保留 item ID、call_id、索引、sequence_number 与已支持回放项，避免先降为纯文本再重造事件。
-
-上游已按用户决定改为 Codex 专用 Responses，使用 store=false、stream=true 和完整上下文。平铺函数工具及请求头按本地参考实现；不再套用 SIWC namespace 规则。见 [当前认证决定](adr/0003-codex-device-gateway.md)。
+- model 仍需非空字符串；input 接收字符串、单个原生输入对象或数组，可为空。字符串规范化为 user 消息，单个对象包装为数组。
+- 原生输入的角色、内容类型、text 值、工具参数/结果、ID 配对、reasoning status/密文及扩展字段不重新严格校验；原值与顺序保留，user 图片入口按下述规则转换。
+- tools 继续转换成 function 定义；tool_choice、instructions、reasoning、include 的非空值直接映射。reasoning.effort/summary 的可选 null 继续视为缺省；不递归修改 schema、参数或密文。
+- reasoning_effort 的目录枚举不作为本地拒绝依据，真实上游决定支持情况。prompt_cache_key 原值放入请求；仅当字符串可成为 HTTP HeaderValue 时添加对应 session/thread 请求头，不能编码为请求头的值只保留在 JSON 中。
+- stream/parallel_tool_calls 采用宽容布尔解析；外部 JSON 由网关聚合，上游始终 stream=true、store=false。
+- 采样、长度、服务端会话控制和用不到的顶层扩展字段跳过，不在本地严格拒绝；已知非空字段用响应头提示。不会因为收到 previous_response_id/conversation/background 而启用服务端会话、恢复路由或后台任务。
+- 保留原生终态与流式投影规则，不将 incomplete/failed 写成 completed。
 
 ## Chat 推理历史兼容规则
 
-客户端历史中的其他已知元数据及可选空值，另见下述“客户端历史与空值兼容规则”。
+此前 2026-10-13 的字符串/null 和 assistant 角色限制现已被“默认信任”方案替代；原始参考依据见 [快照](../99-archive/api-contracts-strict-validation-2026-10-14.md#chat-推理历史兼容规则)。
 
-2026-10-13，用户报告 `Invalid or unsupported field: reasoning_content`。源码定位到本地字段白名单，回归用 assistant 历史消息稳定复现相同 400；未采集真实客户端原始请求，不能据此确认其全部字段形状。本次按已有 Agent 兼容方向新增窄范围例外，不改变 B11 的“Chat 不承诺保留隐藏推理状态”。
-
-只读参考项目 `server/src/api/byok/protocol.rs` 的 `parse_chat_messages` 只从 assistant 读取正文和工具调用，thinking 为空且 replay_state=None。[OpenAI Chat 请求定义](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 未定义该扩展字段；[Responses 推理文档](https://developers.openai.com/api/docs/guides/reasoning) 使用独立 reasoning item 的 encrypted_content 回放。这些是源码和文档依据，不代表本次真实 Codex 验证。
-
-- 仅 Chat 的 `messages[]` 中 role=assistant 接受 `reasoning_content` 字符串或 null；缺省、null、空字符串不产生提示。
-- 非空字符串作为兼容元数据接收后移除；不拼入 instructions、content，不伪造 reasoning item 或 encrypted_content。正文、工具调用 ID、参数原字符串、工具结果和顺序保持。
-- 非空字段在 `X-Tiny-Proxy-Ignored-Parameters` 中以 `messages[].reasoning_content` 列出，同一请求只列一次；`X-Tiny-Proxy-Warning` 为 `Assistant reasoning_content is not replayed to the Codex upstream`。
-- 同时含输出长度参数时，字段名按“长度参数、推理历史字段”顺序以逗号加空格连接，警告按同一顺序以分号加空格连接。JSON/SSE 及请求校验通过后的生成错误响应均保留提示，状态码和正文语义不变。
-- 非字符串/非 null、非 assistant 消息、请求顶层、Responses 消息中的同名字段仍返回 400；其他未知字段和无效工具历史仍拒绝。错误和提示头不包含推理文本。Responses 原生 reasoning item 继续按原规则保留。
+reasoning_content 的任意类型/位置不造成本地拒绝。Chat 转换不将其拼入正文、指令或加密推理回放；assistant 非空值仅以固定名称 `messages[].reasoning_content` 提示一次，其他角色/顶层扩展跳过。警告为 `Assistant reasoning_content is not replayed to the Codex upstream`。省略、null、空字符串不产生该提示。Responses 原生 reasoning 数据直接保留。
 
 ## 客户端历史与空值兼容规则
 
-2026-10-13，用户报告 `Invalid or unsupported field: index`，要求参考旧项目成组修复，并指定核对 `D:/study/codex-proxy-dev`。报错来源是本地字段校验；未收集真实客户端原文，工具历史中的 index 为根据协议和源码确定的复现场景。
+此前关于 index 类型/位置、结果 name 配对、未知 null、schema 类型和 reasoning status 的严格规则已替代，原始依据见 [快照](../99-archive/api-contracts-strict-validation-2026-10-14.md#客户端历史与空值兼容规则)。
 
-参考依据：`cursor-byok-main/server/src/api/byok/protocol.rs` 提取正文、工具 ID、名称和参数，再构造上游项；`codex-proxy-dev/src/types/openai.ts` 的 Zod 对象 schema 去除未声明的 index/reasoning_content，`src/translation/openai-to-codex.ts` 显式重建工具调用。后者还接收但不转发多个采样参数，提供结构化输出、旧函数格式和托管工具等额外能力；这些不等于 Tiny Proxy 已支持，也不作为静默丢弃有效语义的依据。[OpenAI 工具调用说明](https://developers.openai.com/api/docs/guides/function-calling)将 index 定义为流式工具增量的定位信息。此次采用显式位置和类型规则，避免递归删除工具参数或 JSON Schema 中的同名字段。
-
-- Chat 的 `assistant.tool_calls[].index` 接受非负整数（u64）或 null；仅作流式聚合遗留元数据，不转发、不排序、不用于工具匹配。调用按数组顺序保留，结果按 call_id 配对；ID、函数名及完整 JSON 参数字符串仍必需。其他位置的 index 仍拒绝。
-- assistant 的 `tool_calls: null` 等同无调用；`refusal` 接受字符串/null，非空拒绝文本转成原生 refusal 内容，不丢弃。assistant 的 `audio/function_call` 只接受 null，`annotations` 只接受 null/空数组；非空音频、旧函数调用和引文内容仍拒绝。其他角色携带这些 assistant 专属字段仍拒绝。
-- tool 消息 `name` 可省略/null，非空时必须与 tool_call_id 对应调用的函数名一致；不作为新的调用标识，也不转发。其他角色的 name 仍不支持。
-- 两个端点下列顶层字段的 null 等同省略：`stream/store/tools/tool_choice/parallel_tool_calls/prompt_cache_key/temperature/top_p/metadata/user/service_tier`。Chat 另含 `stream_options/reasoning_effort/n/stop/seed/logprobs/top_logprobs/frequency_penalty/presence_penalty/logit_bias/response_format`；Responses 另含 `instructions/reasoning/include/text/truncation`。这是没有值的占位兼容，不支持字段的非空值继续报错；任意未知字段即使 null 也报错。model/messages/input 等必需值不放宽。
-- `stream_options.include_usage` 与 Responses `reasoning.effort/summary` 的 null 等同缺省。函数工具 description/strict 的 null 等同省略，显式 strict=false/true 保持；parameters 省略时补无参数对象 schema，显式 null/非对象拒绝。工具参数、schema 和密文不递归清洗。
-- Responses reasoning item 保留合法 `in_progress/completed/incomplete` status，省略/null 可用，错误类型或未知状态拒绝；保留原有 id/summary/content/encrypted_content。这与 codex-proxy-dev 的合法状态保留方向一致，不采用 cursor-byok 的删除 status 策略。
-- 冗余索引、匹配的工具名称与空值不产生“参数未生效”警告；有效长度参数与非空 reasoning_content 的既有警告仍保留。有效采样、停止条件、结构化输出、服务等级和存储语义不静默丢弃。
-
-对应验收 A17g/A17h；自动回归与真实客户端验证分别记录在 [开发验证记录](../06-delivery/implementation-status.md)。
+- Chat index/name 等元数据只作兼容输入，按调用数组顺序和原 ID 转换；重复 ID、未完成/孤立工具结果可发往上游，不由本地修复或丢弃实际工具历史。
+- 接收任意未知字段/空值；可选 null 通常不映射。tools、tool_choice、instructions、reasoning、include、缓存标识的 null 视为缺省。description/strict 的 null 从定义中省略，其他显式值和 parameters/schema 内的 null 保留。
+- 函数参数字符串保持原文，即使是不完整 JSON；非字符串 Chat 参数序列化，缺省补 `{}`。不执行工具、不递归清洗 schema、原生输入或加密回放。
+- Responses 原生 status/角色/类型/元数据原样转发，上游拒绝按真实失败返回。
 
 ## 图片输入兼容规则
 
-2026-10-13，用户反馈 image_url 被本地文本内容校验拒绝，并批准“按参考项目补齐”。此次追加图片输入范围，替代原先全面拒绝图片的规则。只读参考项目 server/src/api/byok/protocol.rs 的 parse_parts 解码 Base64 图片，server/src/plugin/sdk/protocol/openai_responses.ts 的 contentParts 将其编码为 input_image。标准格式同时核对了 [OpenAI 图片输入文档](https://developers.openai.com/api/docs/guides/images-vision)；这些是源码/文档证据，不能替代真实 Codex 图片测试。
+Base64 图片能力沿用 2026-10-13 的批准边界，新增宽容包装与元数据规则。
 
-- Chat：仅 role=user 的 content 数组接收 `{"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"auto"}}`。转换后为 `{"type":"input_image","image_url":"data:image/png;base64,...","detail":"auto"}`。
-- Responses：仅 role=user 的 content 数组接收上述 input_image 形式。单图、多图、纯图片、图文交错均保留顺序。纯文本与函数工具历史继续按原规则校验。
-- 接受 image/png、image/jpeg、image/webp、image/gif 的非空标准 Base64 data URL，校验 MIME 和编码格式。图片字节是否能解码、GIF 是否静态及模型视觉能力由上游校验；网关不解码/压缩图片像素。拒绝空值、损坏的 Base64、其他 MIME、HTTP(S)/file URL、file_id 和未知图片字段；错误不包含图片数据。
-- detail 省略时补 auto；显式 auto、low、high、original 原样保留，其他值（包括 null）拒绝。未在每个 Codex 模型上实测全部 detail 模式，上游拒绝时保留失败语义。
-- system/developer/assistant 与工具结果中的图片仍拒绝；不静默丢弃图片。参考项目外部 Chat/Responses 入口的工具结果只提取文本，本次不扩展工具图片或其他协议别名。
-- 2026-10-13 用户确认 413 后明确要求“代码里面改为不限制”，替代此前 2 MiB 总请求限制。Chat/Responses 显式关闭 Axum 默认请求体限制，文本、工具历史和 Base64 图片不按字节数拒绝；带 Content-Length 和分块请求共用此规则。正文仍完整读入内存并执行 JSON、字段、工具历史和图片格式校验；不承诺突破客户端、可用内存或上游自身限制。网关不抓取图片地址、不读取本地图片路径、不存储图片正文。
+- Chat user 的 image_url 接受 `{url, detail}` 包装或 Base64 字符串；也接受 input_image 形状。转换为原生 input_image，保持图文顺序。
+- Responses user 的 input_image 继续规范化。PNG / JPEG / WebP / GIF 的 Base64 data URL 需有效且非空；不下载远程 URL、不读取本地路径。错误不回显图片数据。
+- 图片包装/内容块中的 file_id 或额外字段不再触发拒绝；有有效内联 URL 时只用于兼容元数据，图像正文仍不持久化。
+- detail 缺省/null 补 auto，其他值原样发送，由上游决定是否支持，不在本地校验枚举或类型。
+- Chat 非 user 图片因不能转换为文本仍拒绝；Responses 非 user 消息 content 中的 input_image 仍遵守既有角色边界，原生工具结果不重新解析。
+- 请求体仍没有本地字节上限；仅保留 JSON、转换所需的形状及图片入口检查，不检查工具历史配对。内存及上游限制仍可能影响真实请求。
 
 ## 输出长度参数兼容规则
 
-2026-10-13，用户反馈第三方 Agent 自动携带 max_tokens 后收到 400，并明确批准“接受兼容处理，优先让 Agent 接入”。此次仅替代原契约中拒绝输出长度参数的规则。参考项目在外部入口读取长度参数，在 Codex provider 中将 maxOutputTokens 置 null；其测试断言上游请求不存在 max_output_tokens。源码依据为只读参考项目的 server/src/api/byok/protocol.rs、server/plugins/build-in/codex-auth/provider.ts 与 codex_test.ts；这是代码核对，不是本次上游实测。
+此前只接收 u64 正整数的规则已替代，原始来源见 [快照](../99-archive/api-contracts-strict-validation-2026-10-14.md#输出长度参数兼容规则)。两个接口均接收 max_tokens/max_completion_tokens/max_output_tokens 的任意类型，非空值全部跳过，不改写提示词或截断内容来模拟上限，null 不产生长度提示。
 
-本网关仅接受各路由上述长度字段。正整数从发往上游的请求中移除，不通过改写提示词、字符截断或截断工具参数模拟 token 上限；实际输出和 usage 仍由上游决定。null 等同未设置，零、负数、小数、字符串、布尔值及非数值结构返回 400。其他未支持字段继续拒绝。
+JSON/SSE（包括后续生成失败）保留固定兼容提示头：
 
-含有效非空长度参数且通过请求校验时，JSON 和 SSE 响应均附加：
-
-- X-Tiny-Proxy-Ignored-Parameters：实际未生效的字段名，多个值以逗号加空格分隔，如 max_tokens, max_completion_tokens。
-- X-Tiny-Proxy-Warning：Output token limits are not enforced by the Codex upstream。
-
-这两个头也保留在后续生成失败的 HTTP 响应上，不改变原状态码或错误正文。没有非空长度参数时不添加长度提示；若含非空 Chat 推理历史字段，仍按上述规则添加对应提示。它们是网关扩展，客户端可能不会在界面显示，接入方不能依赖这些参数控制实际生成长度或额度消耗。
+- `X-Tiny-Proxy-Ignored-Parameters` 按“长度、已知跳过选项、Chat 推理元数据”列出固定名称，同一类别按代码顺序；未知名称不列入。
+- 有长度字段时包含 `Output token limits are not enforced by the Codex upstream`；有 assistant 推理元数据时包含上述未回放警告；其他已知选项被跳过时包含 `Unsupported client options are ignored; the gateway uses one result and store=false`。
+- 多个警告按“长度、推理元数据、其他选项”以分号连接。不能依赖这些跳过的值控制输出、采样、保存或费用。
 
 ## 响应字段与 usage
 
@@ -139,7 +121,7 @@ JSON 错误外壳为 error 对象，至少含 message、type、code，可含 par
 
 | 状态 | 本机含义/错误码 |
 |---|---|
-| 400 | invalid_request、unsupported_parameter、unsupported_content、invalid_tool_history |
+| 400 | invalid_request、unsupported_or_invalid_parameter（字段、内容或工具历史校验失败）、upstream_rejected_request |
 | 401 | invalid_gateway_key；仅表示客户端密钥缺失、错误或已撤销并删除 |
 | 403 | 撤销与已通过鉴权请求竞争时的 key_revoked，或已明确的模型权限限制 |
 | 404 | model_not_found 或未知路径 |
@@ -154,6 +136,14 @@ JSON 错误外壳为 error 对象，至少含 message、type、code，可含 par
 2026-10-13 按用户要求及 [B20](../01-requirements/business-rules.md) 改为撤销即删除：删除后的新请求统一返回 401 invalid_gateway_key，替代此前为已撤销记录返回 403；仍取消已登记的在途请求，验收 A09、A24、A45—A47。
 
 发出 HTTP 200/SSE 后不能改 HTTP 状态。Chat 用 data 中的 error 对象后关闭；Responses 按是否已建立 response 上下文发送合法 error/response.failed。具体消费者对流内错误的识别在兼容矩阵中验证，不能保证所有 Agent 都正确处理。
+
+### 本地参数校验诊断（2026-10-14）
+
+此前根据通用 400 报错补充了字段位置与安全建议；用户随后要求默认信任字段，因此本地错误仅用于必需结构/图片转换失败，扩展字段不作为错误。
+
+HTTP 400 / `unsupported_or_invalid_parameter` 的 `error.param` 标明无法转换的位置（从 0 开始的索引），例如 `messages[0].tool_calls[0].function.name` 或 `input[0].content[0].image_url`。`error.message` 包含固定规则和建议。异常表只记录代码生成的字段路径与文案，不含任意字段名/值。
+
+该阶段拒绝时未开始生成调用；详情注明“尚未发送到上游”。上游不接受已转发的值属于上游失败阶段，保留原失败。旧通用异常不改写，详见 [请求诊断](../05-operations/request-diagnostics.md#参数校验失败怎么处理2026-10-14)。
 
 ## 支持声明
 

@@ -64,7 +64,7 @@ fn assistant_reasoning_metadata_preserves_text_and_tool_history_without_replay()
     }
 }
 
-fn invalid_requests() -> Vec<Value> {
+fn trusted_requests() -> Vec<Value> {
     let mut requests = vec![];
     for value in [json!(false), json!(7), json!([]), json!({"text":REASONING})] {
         requests.push(history(value));
@@ -93,17 +93,15 @@ fn invalid_requests() -> Vec<Value> {
 }
 
 #[test]
-fn reasoning_compatibility_does_not_relax_types_roles_unknown_fields_or_tool_links() {
-    for body in invalid_requests() {
-        let error = normalize_chat(body)
-            .err()
-            .expect("invalid history must fail");
-        assert!(!error.to_string().contains(REASONING));
+fn reasoning_metadata_types_roles_and_history_are_trusted_without_replay() {
+    for body in trusted_requests() {
+        let request = normalize_chat(body).expect("trusted history must convert");
+        assert!(!request.body.to_string().contains(REASONING));
     }
 }
 
 #[test]
-fn responses_keeps_native_reasoning_replay_and_rejects_chat_metadata() {
+fn responses_keeps_native_reasoning_replay_and_accepts_chat_metadata() {
     let input = json!([
         {"type":"reasoning","id":"r1","summary":[],"encrypted_content":"synthetic-ciphertext"},
         {"type":"function_call","call_id":"c1","name":"read_file","arguments":"{}"},
@@ -114,9 +112,9 @@ fn responses_keeps_native_reasoning_replay_and_rejects_chat_metadata() {
     assert!(request.ignored_parameters.is_empty());
     assert!(
         normalize_responses(json!({"model":"fixture","input":"hi","reasoning_content":null}))
-            .is_err()
+            .is_ok()
     );
-    assert!(normalize_responses(json!({"model":"fixture","input":[{"role":"assistant","content":"hello","reasoning_content":null}]})).is_err());
+    assert!(normalize_responses(json!({"model":"fixture","input":[{"role":"assistant","content":"hello","reasoning_content":null}]})).is_ok());
 }
 
 #[tokio::test]
@@ -222,7 +220,7 @@ async fn reasoning_history_works_over_http_with_accurate_warnings_for_json_sse_a
     }
     let before = seen.lock().unwrap().len();
     assert_eq!(before, 12);
-    for body in invalid_requests() {
+    for body in trusted_requests() {
         let response = http
             .post(&url)
             .bearer_auth(key.value.as_str())
@@ -230,11 +228,26 @@ async fn reasoning_history_works_over_http_with_accurate_warnings_for_json_sse_a
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 400);
-        let error: Value = response.json().await.unwrap();
-        assert_eq!(error["error"]["code"], "unsupported_or_invalid_parameter");
-        assert!(!error.to_string().contains("synthetic-private"));
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
+            "continued"
+        );
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .to_string()
+                .contains(REASONING)
+        );
     }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        before + trusted_requests().len()
+    );
+    let before = seen.lock().unwrap().len();
     let body = history(json!(REASONING));
     assert_eq!(
         http.post(&url).json(&body).send().await.unwrap().status(),

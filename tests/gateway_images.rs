@@ -208,24 +208,6 @@ fn invalid_image_envelopes_are_rejected_without_echoing_data() {
             }
             bad_parts.push(part);
         }
-        for detail in [Value::Null, json!(3), json!("ultra")] {
-            let mut part = image(chat, PNG);
-            if chat {
-                part["image_url"]["detail"] = detail;
-            } else {
-                part["detail"] = detail;
-            }
-            bad_parts.push(part);
-        }
-        let mut unknown = image(chat, PNG);
-        unknown["file_id"] = json!("file-private");
-        bad_parts.push(unknown);
-        if chat {
-            let mut unknown = image(true, PNG);
-            unknown["image_url"]["extra"] = json!(true);
-            bad_parts.push(unknown);
-            bad_parts.push(json!({"type":"image_url","image_url":PNG}));
-        }
         for part in bad_parts {
             let error = normalize(chat, request(chat, json!([part]))).unwrap_err();
             assert!(!error.to_string().contains("private"));
@@ -235,7 +217,38 @@ fn invalid_image_envelopes_are_rejected_without_echoing_data() {
 }
 
 #[test]
-fn images_do_not_bypass_role_or_tool_history_constraints() {
+fn image_metadata_and_detail_values_are_accepted_without_field_or_enum_checks() {
+    for chat in [true, false] {
+        for detail in [Value::Null, json!(3), json!("ultra")] {
+            let mut part = image(chat, PNG);
+            part["file_id"] = json!("file-private");
+            if chat {
+                part["image_url"]["detail"] = detail.clone();
+                part["image_url"]["extra"] = json!(true);
+            } else {
+                part["detail"] = detail.clone();
+            }
+            let body = normalize(chat, request(chat, json!([part]))).unwrap();
+            assert_eq!(body["input"][0]["content"][0]["image_url"], PNG);
+            assert_eq!(
+                body["input"][0]["content"][0]["detail"],
+                if detail.is_null() {
+                    json!("auto")
+                } else {
+                    detail
+                }
+            );
+            assert!(!body.to_string().contains("file-private"));
+        }
+    }
+    let body = normalize_chat(request(true, json!([{"type":"image_url","image_url":PNG}])))
+        .unwrap()
+        .body;
+    assert_eq!(body["input"][0]["content"][0]["image_url"], PNG);
+}
+
+#[test]
+fn images_keep_the_user_role_boundary_while_tool_history_is_trusted() {
     for chat in [true, false] {
         for role in ["system", "developer", "assistant"] {
             let mut body = request(chat, json!([image(chat, PNG)]));
@@ -252,7 +265,10 @@ fn images_do_not_bypass_role_or_tool_history_constraints() {
         {"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
         {"type":"function_call_output","call_id":"c1","output":[image(false, PNG)]}
     ]});
-    assert!(normalize_responses(responses).is_err());
+    assert_eq!(
+        normalize_responses(responses.clone()).unwrap().body["input"],
+        responses["input"]
+    );
     for chat in [true, false] {
         let mut body = request(chat, json!([image(chat, PNG)]));
         let items = body[if chat { "messages" } else { "input" }]
@@ -261,7 +277,10 @@ fn images_do_not_bypass_role_or_tool_history_constraints() {
         items.insert(0, if chat {
             json!({"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]})
         } else { json!({"type":"function_call","call_id":"c1","name":"read","arguments":"{}"}) });
-        assert!(normalize(chat, body).is_err(), "pending call, chat={chat}");
+        assert!(
+            normalize(chat, body).is_ok(),
+            "pending call is left for upstream, chat={chat}"
+        );
     }
 }
 
@@ -496,10 +515,17 @@ async fn images_and_large_requests_reach_http_upstream_with_auth() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 400);
-        assert_eq!(seen.lock().unwrap().len(), before_rejected);
+        assert_eq!(response.status(), 200);
+        assert!(
+            response.headers()["x-tiny-proxy-ignored-parameters"]
+                .to_str()
+                .unwrap()
+                .contains("temperature")
+        );
+        let _ = response.bytes().await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), before_rejected + 1);
     }
-    assert_eq!(seen.lock().unwrap().len(), 20);
+    assert_eq!(seen.lock().unwrap().len(), 22);
     gateway.stop().await;
     for (id, body_size) in large_records {
         let record = store.request_record(&id).await.unwrap().unwrap();

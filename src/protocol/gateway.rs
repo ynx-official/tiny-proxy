@@ -9,17 +9,69 @@ use std::collections::{BTreeMap, HashSet};
 pub struct Error {
     pub message: &'static str,
     pub param: String,
+    diagnostic_param: String,
+    guidance: &'static str,
 }
-fn invalid(param: &str) -> Error {
+impl Error {
+    fn at(mut self, parent: &str) -> Self {
+        if parent.is_empty() {
+            return self;
+        }
+        let container = (self.param.is_empty() && self.diagnostic_param.is_empty())
+            || (self.param == "object" && self.diagnostic_param == "object");
+        self.param = if container {
+            parent.into()
+        } else {
+            format!("{parent}.{}", self.param)
+        };
+        self.diagnostic_param = if container {
+            parent.into()
+        } else {
+            format!("{parent}.{}", self.diagnostic_param)
+        };
+        self
+    }
+
+    /// Only code-owned paths, array indices and rules may enter the journal.
+    /// Arbitrary client keys are returned to that client, never persisted.
+    pub fn diagnostic_message(&self) -> String {
+        format!("参数 {}：{}", self.diagnostic_param, self.guidance)
+    }
+}
+fn context<T>(parent: &str, operation: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    operation().map_err(|e| e.at(parent))
+}
+fn invalid(param: &'static str) -> Error {
+    let guidance = match param {
+        "object" => "此处必须是 JSON 对象才能转换；建议：检查请求结构",
+        "model" => "model 必须是非空字符串；建议：提供模型 ID",
+        "messages" => "messages 必须是数组才能转换；建议：提供 Chat 消息数组",
+        "input" => "input 必须是字符串、输入对象或数组；建议：提供 Responses 输入结构",
+        "role" => "Chat 消息缺少非空字符串 role；建议：提供消息角色",
+        "content" => "内容无法转换成文本或受支持的图片；建议：提供字符串或对应内容块数组",
+        "text" => "文本块的 text 必须是字符串才能转换；建议：提供文本字符串",
+        "tools" => "tools 必须是数组才能转换；建议：提供 function 定义数组",
+        "name" => "函数 name 必须是非空字符串才能转换；建议：提供函数名",
+        "id" | "tool_call_id" => "调用 ID 必须是非空字符串才能转换；建议：提供调用 ID",
+        "tool_calls" => "tool_calls 必须是数组才能转换；建议：提供调用数组",
+        _ => "此处缺少协议转换所需的结构；建议：检查对应字段的基本格式",
+    };
+    invalid_because(param, guidance)
+}
+fn invalid_because(param: &'static str, guidance: &'static str) -> Error {
     Error {
         message: "Invalid or unsupported field",
         param: param.into(),
+        diagnostic_param: param.into(),
+        guidance,
     }
 }
 fn protocol() -> Error {
     Error {
         message: "Upstream stream failed integrity checks",
         param: String::new(),
+        diagnostic_param: String::new(),
+        guidance: "上游流完整性校验失败；建议：检查上游连接与终态事件",
     }
 }
 
@@ -29,53 +81,76 @@ pub struct Request {
     pub include_usage: bool,
     pub ignored_parameters: Vec<&'static str>,
 }
-fn fields(v: &Value, allowed: &[&str]) -> Result<(), Error> {
-    let obj = v.as_object().ok_or_else(|| invalid("object"))?;
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(invalid(key));
-        }
-    }
-    Ok(())
+// Downstream envelopes are trusted. Only inspect the structure needed for
+// conversion; native values and opaque payloads are left for the upstream.
+fn object(v: &Value) -> Result<&Map<String, Value>, Error> {
+    v.as_object().ok_or_else(|| invalid("object"))
 }
 fn omit_nulls(v: &mut Value, optional: &[&str]) {
-    // Only normalize named envelope fields. Recursive cleanup would corrupt
-    // tool arguments, JSON Schema constants/defaults and opaque replay data.
     if let Some(object) = v.as_object_mut() {
         object.retain(|key, value| !(value.is_null() && optional.contains(&key.as_str())));
     }
 }
-fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str, Error> {
+fn string<'a>(v: &'a Value, key: &'static str) -> Result<&'a str, Error> {
     v[key]
         .as_str()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| invalid(key))
 }
-fn boolean(v: &Value, key: &str, default: bool) -> Result<bool, Error> {
-    match v.get(key) {
-        None | Some(Value::Null) => Ok(default),
-        Some(v) => v.as_bool().ok_or_else(|| invalid(key)),
+fn boolean(v: &Value, key: &str, default: bool) -> bool {
+    match &v[key] {
+        Value::Bool(value) => *value,
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => default,
+        },
+        Value::Number(value) if value.as_u64() == Some(1) => true,
+        Value::Number(value) if value.as_u64() == Some(0) => false,
+        _ => default,
     }
 }
-fn token_limits(v: &Value, keys: &[&'static str]) -> Result<Vec<&'static str>, Error> {
-    let mut ignored = Vec::new();
-    for &key in keys {
-        if let Some(value) = v.get(key).filter(|value| !value.is_null()) {
-            if value.as_u64().is_none_or(|limit| limit == 0) {
-                return Err(invalid(key));
-            }
-            // Codex rejects output caps. Keep their names for the HTTP warning,
-            // rather than forwarding them or truncating text/tool arguments.
+fn ignored_parameters(v: &Value) -> Vec<&'static str> {
+    // Only fixed names go into headers, never arbitrary client extension keys.
+    let mut ignored = vec![];
+    for key in [
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "stop",
+        "seed",
+        "logprobs",
+        "top_logprobs",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "response_format",
+        "metadata",
+        "user",
+        "service_tier",
+        "text",
+        "truncation",
+        "previous_response_id",
+        "conversation",
+        "background",
+        "functions",
+        "function_call",
+    ] {
+        if v.get(key).is_some_and(|value| !value.is_null()) {
             ignored.push(key);
         }
     }
-    Ok(ignored)
-}
-fn name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    if v.get("n")
+        .is_some_and(|v| !v.is_null() && v.as_u64() != Some(1))
+    {
+        ignored.push("n");
+    }
+    if v.get("store").is_some_and(|v| !v.is_null() && v != false) {
+        ignored.push("store");
+    }
+    ignored
 }
 fn content(v: &Value, nullable: bool) -> Result<String, Error> {
     if v.is_null() && nullable {
@@ -85,47 +160,53 @@ fn content(v: &Value, nullable: bool) -> Result<String, Error> {
         return Ok(s.into());
     }
     let mut result = String::new();
-    for part in v.as_array().ok_or_else(|| invalid("content"))? {
-        fields(part, &["type", "text"])?;
-        if part["type"] != "text" {
-            return Err(invalid("content.type"));
-        }
-        result.push_str(
-            part["text"]
-                .as_str()
-                .ok_or_else(|| invalid("content.text"))?,
-        );
+    for (index, part) in v
+        .as_array()
+        .ok_or_else(|| invalid("content"))?
+        .iter()
+        .enumerate()
+    {
+        let text = context(&format!("content[{index}]"), || {
+            object(part)?;
+            if matches!(part["type"].as_str(), Some("image_url" | "input_image")) {
+                return Err(invalid_because(
+                    "type",
+                    "此角色的内容无法转换成文本；建议：使用文本块，图片仅放入 user 消息",
+                ));
+            }
+            part["text"].as_str().ok_or_else(|| invalid("text"))
+        })?;
+        result.push_str(text);
     }
     Ok(result)
 }
-
-fn input_image(part: &Value) -> Result<Value, Error> {
-    fields(part, &["type", "image_url", "detail"])?;
-    let url = string(part, "image_url")?;
-    let (prefix, encoded) = url.split_once(',').ok_or_else(|| invalid("image_url"))?;
+fn input_image(part: &Value, url_field: &'static str) -> Result<Value, Error> {
+    let image_error = || {
+        invalid_because(
+            url_field,
+            "图片入口仅支持有效且非空的 PNG / JPEG / WebP / GIF Base64 data URL；建议：使用支持的 Base64 图片格式",
+        )
+    };
+    let url = part[url_field].as_str().ok_or_else(image_error)?;
+    let (prefix, encoded) = url.split_once(',').ok_or_else(image_error)?;
     let mime = prefix
         .strip_prefix("data:")
-        .and_then(|prefix| prefix.strip_suffix(";base64"))
-        .ok_or_else(|| invalid("image_url"))?;
-    // Only inline bytes cross this boundary. Never fetch a client URL or read a
-    // local path. Request body size is unrestricted by explicit user choice;
-    // MIME and Base64 validation still apply before forwarding.
+        .and_then(|p| p.strip_suffix(";base64"))
+        .ok_or_else(image_error)?;
+    // Keep the approved inline-image boundary: never fetch a URL or read a path.
     if !["image/png", "image/jpeg", "image/webp", "image/gif"].contains(&mime)
         || encoded.is_empty()
         || STANDARD.decode(encoded).is_err()
     {
-        return Err(invalid("image_url"));
+        return Err(image_error());
     }
-    let detail = match part.get("detail") {
-        None => "auto",
-        Some(value) => value
-            .as_str()
-            .filter(|value| ["auto", "low", "high", "original"].contains(value))
-            .ok_or_else(|| invalid("image_url.detail"))?,
-    };
+    let detail = part
+        .get("detail")
+        .filter(|v| !v.is_null())
+        .cloned()
+        .unwrap_or(json!("auto"));
     Ok(json!({"type":"input_image","image_url":url,"detail":detail}))
 }
-
 fn user_content(v: &Value) -> Result<Vec<Value>, Error> {
     if let Some(text) = v.as_str() {
         return Ok(if text.is_empty() {
@@ -135,536 +216,241 @@ fn user_content(v: &Value) -> Result<Vec<Value>, Error> {
         });
     }
     let mut result = vec![];
-    for part in v.as_array().ok_or_else(|| invalid("content"))? {
-        match part["type"].as_str() {
-            Some("text") => {
-                fields(part, &["type", "text"])?;
-                let text = part["text"]
-                    .as_str()
-                    .ok_or_else(|| invalid("content.text"))?;
-                if !text.is_empty() {
-                    result.push(json!({"type":"input_text","text":text}));
+    for (index, part) in v
+        .as_array()
+        .ok_or_else(|| invalid("content"))?
+        .iter()
+        .enumerate()
+    {
+        let converted = context(&format!("content[{index}]"), || {
+            object(part)?;
+            match part["type"].as_str() {
+                Some("image_url") if part["image_url"].is_string() => {
+                    input_image(part, "image_url").map(Some)
+                }
+                Some("image_url") => context("image_url", || {
+                    object(&part["image_url"])?;
+                    input_image(&part["image_url"], "url").map(Some)
+                }),
+                Some("input_image") => input_image(part, "image_url").map(Some),
+                _ => {
+                    let text = part["text"].as_str().ok_or_else(|| invalid("text"))?;
+                    Ok((!text.is_empty()).then(|| json!({"type":"input_text","text":text})))
                 }
             }
-            Some("image_url") => {
-                fields(part, &["type", "image_url"])?;
-                let image = &part["image_url"];
-                fields(image, &["url", "detail"])?;
-                let mut converted = json!({"type":"input_image","image_url":image["url"]});
-                if let Some(detail) = image.get("detail") {
-                    converted["detail"] = detail.clone();
-                }
-                result.push(input_image(&converted)?);
-            }
-            _ => return Err(invalid("content.type")),
+        })?;
+        if let Some(part) = converted {
+            result.push(part);
         }
     }
     Ok(result)
 }
-
-fn args(v: &Value, key: &str) -> Result<String, Error> {
-    let s = v[key].as_str().ok_or_else(|| invalid(key))?;
-    if !serde_json::from_str::<Value>(s).is_ok_and(|v| v.is_object()) {
-        return Err(invalid(key));
+fn args(v: &Value, key: &str) -> String {
+    match v.get(key) {
+        None => "{}".into(),
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => value.to_string(),
     }
-    Ok(s.into())
 }
 fn base(v: &Value) -> Result<Map<String, Value>, Error> {
+    object(v)?;
     let model = string(v, "model")?;
-    if model.len() > 200 || model.chars().any(char::is_control) {
-        return Err(invalid("model"));
+    let mut body = json!({"model":model,"stream":true,"store":false,"instructions":"","include":["reasoning.encrypted_content"]}).as_object().unwrap().clone();
+    if let Some(cache) = v.get("prompt_cache_key").filter(|v| !v.is_null()) {
+        body.insert("prompt_cache_key".into(), cache.clone());
     }
-    if boolean(v, "store", false)? {
-        return Err(invalid("store"));
-    }
-    let mut b = json!({"model":model,"stream":true,"store":false,"instructions":"","include":["reasoning.encrypted_content"]}).as_object().unwrap().clone();
-    if let Some(key) = v.get("prompt_cache_key") {
-        let s = key
-            .as_str()
-            .filter(|s| {
-                !s.is_empty()
-                    && s.len() <= 256
-                    && s.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"-_:./".contains(&b))
-            })
-            .ok_or_else(|| invalid("prompt_cache_key"))?;
-        b.insert("prompt_cache_key".into(), json!(s));
-    }
-    Ok(b)
+    Ok(body)
 }
-fn tools(v: &Value, chat: bool, b: &mut Map<String, Value>) -> Result<(), Error> {
-    let mut names = HashSet::new();
-    if let Some(raw) = v.get("tools") {
-        let raw = raw
-            .as_array()
-            .filter(|a| a.len() <= 128)
-            .ok_or_else(|| invalid("tools"))?;
+fn tools(v: &Value, chat: bool, body: &mut Map<String, Value>) -> Result<(), Error> {
+    if let Some(raw) = v.get("tools").filter(|v| !v.is_null()) {
+        let raw = raw.as_array().ok_or_else(|| invalid("tools"))?;
         let mut converted = vec![];
-        for tool in raw {
-            let function = if chat {
-                fields(tool, &["type", "function"])?;
-                &tool["function"]
-            } else {
-                tool
-            };
-            if tool["type"] != "function" {
-                return Err(invalid("tools.type"));
-            }
-            fields(
-                function,
-                if chat {
-                    &["name", "description", "parameters", "strict"]
-                } else {
-                    &["type", "name", "description", "parameters", "strict"]
-                },
-            )?;
-            let n = string(function, "name")?;
-            if !name(n) || !names.insert(n.to_owned()) {
-                return Err(invalid("tools.name"));
-            }
-            if function.get("parameters").is_some_and(|v| !v.is_object()) {
-                return Err(invalid("tools.parameters"));
-            }
-            if function
-                .get("description")
-                .is_some_and(|v| !v.is_null() && !v.is_string())
-            {
-                return Err(invalid("tools.description"));
-            }
-            if function
-                .get("strict")
-                .is_some_and(|v| !v.is_null() && !v.is_boolean())
-            {
-                return Err(invalid("tools.strict"));
-            }
-            let mut f = function.as_object().unwrap().clone();
-            f.retain(|key, value| {
-                !(["description", "strict"].contains(&key.as_str()) && value.is_null())
-            });
-            f.entry("parameters")
-                .or_insert_with(|| json!({"type":"object","properties":{}}));
-            f.insert("type".into(), json!("function"));
-            converted.push(Value::Object(f));
+        for (index, tool) in raw.iter().enumerate() {
+            converted.push(context(&format!("tools[{index}]"), || {
+                object(tool)?;
+                let wrapped = chat && tool.get("function").is_some();
+                let function = if wrapped { &tool["function"] } else { tool };
+                context(if wrapped { "function" } else { "" }, || {
+                    let definition = object(function)?;
+                    string(function, "name")?;
+                    let mut function = definition.clone();
+                    function.retain(|key, value| {
+                        !(["description", "strict"].contains(&key.as_str()) && value.is_null())
+                    });
+                    function
+                        .entry("parameters")
+                        .or_insert_with(|| json!({"type":"object","properties":{}}));
+                    function.insert("type".into(), json!("function"));
+                    Ok(Value::Object(function))
+                })
+            })?);
         }
-        b.insert("tools".into(), json!(converted));
+        body.insert("tools".into(), json!(converted));
     }
-    if let Some(choice) = v.get("tool_choice") {
-        let converted = if let Some(s) = choice.as_str() {
-            if !["auto", "none", "required"].contains(&s) || (s == "required" && names.is_empty()) {
-                return Err(invalid("tool_choice"));
-            }
-            choice.clone()
+    if let Some(choice) = v.get("tool_choice").filter(|v| !v.is_null()) {
+        let converted = if chat && choice["function"]["name"].is_string() {
+            json!({"type":"function","name":choice["function"]["name"]})
         } else {
-            fields(
-                choice,
-                if chat {
-                    &["type", "function"]
-                } else {
-                    &["type", "name"]
-                },
-            )?;
-            if choice["type"] != "function" {
-                return Err(invalid("tool_choice"));
-            }
-            let f = if chat {
-                fields(&choice["function"], &["name"])?;
-                &choice["function"]
-            } else {
-                choice
-            };
-            let n = string(f, "name")?;
-            if !names.contains(n) {
-                return Err(invalid("tool_choice.name"));
-            }
-            json!({"type":"function","name":n})
+            choice.clone()
         };
-        b.insert("tool_choice".into(), converted);
+        body.insert("tool_choice".into(), converted);
     }
-    if v.get("parallel_tool_calls").is_some() {
-        b.insert(
+    if v.get("parallel_tool_calls").is_some_and(|v| !v.is_null()) {
+        body.insert(
             "parallel_tool_calls".into(),
-            json!(boolean(v, "parallel_tool_calls", false)?),
+            json!(boolean(v, "parallel_tool_calls", false)),
         );
     }
     Ok(())
 }
-
-pub fn normalize_chat(mut v: Value) -> Result<Request, Error> {
-    omit_nulls(
-        &mut v,
-        &[
-            "stream",
-            "store",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "prompt_cache_key",
-            "stream_options",
-            "reasoning_effort",
-            "n",
-            "temperature",
-            "top_p",
-            "stop",
-            "seed",
-            "logprobs",
-            "top_logprobs",
-            "frequency_penalty",
-            "presence_penalty",
-            "logit_bias",
-            "response_format",
-            "metadata",
-            "user",
-            "service_tier",
-        ],
-    );
-    fields(
-        &v,
-        &[
-            "model",
-            "messages",
-            "stream",
-            "stream_options",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "reasoning_effort",
-            "max_tokens",
-            "max_completion_tokens",
-            "n",
-            "store",
-            "prompt_cache_key",
-        ],
-    )?;
-    let mut ignored_parameters = token_limits(&v, &["max_tokens", "max_completion_tokens"])?;
-    if v.get("n").is_some_and(|n| n.as_u64() != Some(1)) {
-        return Err(invalid("n"));
-    }
-    let mut b = base(&v)?;
+pub fn normalize_chat(v: Value) -> Result<Request, Error> {
+    let mut body = base(&v)?;
+    let mut ignored_parameters = ignored_parameters(&v);
     let mut input = vec![];
     let mut instructions = vec![];
-    let mut instruction_role = None;
-    let mut calls = BTreeMap::new();
-    let mut pending = HashSet::new();
     let messages = v["messages"]
         .as_array()
-        .filter(|m| !m.is_empty())
         .ok_or_else(|| invalid("messages"))?;
-    for m in messages {
-        fields(
-            m,
-            &[
-                "role",
-                "content",
-                "tool_calls",
-                "tool_call_id",
-                "reasoning_content",
-                "name",
-                "refusal",
-                "audio",
-                "function_call",
-                "annotations",
-            ],
-        )?;
-        let role = string(m, "role")?;
-        for field in ["refusal", "audio", "function_call", "annotations"] {
-            if let Some(value) = m.get(field) {
-                let valid = value.is_null()
-                    || match field {
-                        "refusal" => value.is_string(),
-                        "annotations" => value.as_array().is_some_and(Vec::is_empty),
-                        _ => false,
-                    };
-                if role != "assistant" || !valid {
-                    return Err(invalid(field));
-                }
-            }
-        }
-        if role != "tool" && m.get("name").is_some() {
-            return Err(invalid("messages.name"));
-        }
-        if let Some(reasoning) = m.get("reasoning_content") {
-            if role != "assistant" || !(reasoning.is_null() || reasoning.is_string()) {
-                return Err(invalid("reasoning_content"));
-            }
-            // Chat reasoning text cannot stand in for a Codex encrypted replay
-            // item. Accept client history metadata without injecting it into
-            // instructions/content, and report nonempty omissions once per request.
-            if reasoning.as_str().is_some_and(|text| !text.is_empty())
+    for (index, message) in messages.iter().enumerate() {
+        context(&format!("messages[{index}]"), || {
+            object(message)?;
+            let role = string(message, "role")?;
+            if role == "assistant"
+                && message
+                    .get("reasoning_content")
+                    .is_some_and(|v| !v.is_null() && v != "")
                 && !ignored_parameters.contains(&"messages[].reasoning_content")
             {
                 ignored_parameters.push("messages[].reasoning_content");
             }
-        }
-        if role != "assistant" && m.get("tool_calls").is_some() {
-            return Err(invalid("tool_calls"));
-        }
-        if role != "tool" && m.get("tool_call_id").is_some() {
-            return Err(invalid("tool_call_id"));
-        }
-        match role {
-            "system" | "developer" => {
-                if !input.is_empty() || instruction_role.is_some_and(|r| r != role) {
-                    return Err(invalid("messages.role"));
-                }
-                instruction_role = Some(role);
-                instructions.push(content(&m["content"], false)?);
-            }
-            "user" | "assistant" => {
-                if !pending.is_empty() {
-                    return Err(invalid("messages.tool_call_id"));
-                }
-                let mut c = if role == "user" {
-                    user_content(&m["content"])?
-                } else {
-                    let text = content(&m["content"], true)?;
-                    if text.is_empty() {
-                        vec![]
+            match role {
+                "system" | "developer" => {
+                    let text = content(&message["content"], false)?;
+                    if input.is_empty() {
+                        instructions.push(text);
                     } else {
-                        vec![json!({"type":"output_text","text":text})]
+                        input.push(json!({"type":"message","role":role,"content":[{"type":"input_text","text":text}]}));
                     }
-                };
-                if let Some(refusal) = m["refusal"].as_str().filter(|s| !s.is_empty()) {
-                    c.push(json!({"type":"refusal","refusal":refusal}));
                 }
-                if !c.is_empty() {
-                    input.push(json!({"type":"message","role":role,"content":c}));
+                "tool" => {
+                    let id = string(message, "tool_call_id")?;
+                    input.push(json!({"type":"function_call_output","call_id":id,"output":content(&message["content"],false)?}));
                 }
-                if let Some(tc) = m.get("tool_calls").filter(|v| !v.is_null()) {
-                    for call in tc.as_array().ok_or_else(|| invalid("tool_calls"))? {
-                        fields(call, &["id", "type", "function", "index"])?;
-                        // Clients often retain the stream assembly index in
-                        // history. Array order and call IDs remain authoritative.
-                        if call
-                            .get("index")
-                            .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
-                        {
-                            return Err(invalid("messages[].tool_calls[].index"));
+                _ => {
+                    let mut parts = if role == "user" {
+                        user_content(&message["content"])?
+                    } else {
+                        let text = content(&message["content"], true)?;
+                        if text.is_empty() {
+                            vec![]
+                        } else {
+                            vec![
+                                json!({"type":if role == "assistant" {"output_text"} else {"input_text"},"text":text}),
+                            ]
                         }
-                        fields(&call["function"], &["name", "arguments"])?;
-                        let id = string(call, "id")?;
-                        let n = string(&call["function"], "name")?;
-                        if call["type"] != "function"
-                            || !name(n)
-                            || calls.insert(id.to_owned(), n.to_owned()).is_some()
+                    };
+                    if role == "assistant"
+                        && let Some(refusal) = message["refusal"].as_str().filter(|s| !s.is_empty())
+                    {
+                        parts.push(json!({"type":"refusal","refusal":refusal}));
+                    }
+                    if !parts.is_empty() {
+                        input.push(json!({"type":"message","role":role,"content":parts}));
+                    }
+                    if role == "assistant"
+                        && let Some(raw) = message.get("tool_calls").filter(|v| !v.is_null())
+                    {
+                        for (index, call) in raw
+                            .as_array()
+                            .ok_or_else(|| invalid("tool_calls"))?
+                            .iter()
+                            .enumerate()
                         {
-                            return Err(invalid("tool_calls"));
+                            context(&format!("tool_calls[{index}]"), || {
+                                object(call)?;
+                                let id = string(call, "id")?;
+                                let function = &call["function"];
+                                let (name, arguments) = context("function", || {
+                                    object(function)?;
+                                    Ok((string(function, "name")?, args(function, "arguments")))
+                                })?;
+                                input.push(json!({"type":"function_call","call_id":id,"name":name,"arguments":arguments}));
+                                Ok(())
+                            })?;
                         }
-                        pending.insert(id.to_owned());
-                        input.push(json!({"type":"function_call","call_id":id,"name":n,"arguments":args(&call["function"],"arguments")?}));
                     }
                 }
             }
-            "tool" => {
-                let id = string(m, "tool_call_id")?;
-                if !pending.remove(id) {
-                    return Err(invalid("tool_call_id"));
-                }
-                if let Some(tool_name) = m.get("name").filter(|v| !v.is_null())
-                    && tool_name.as_str() != calls.get(id).map(String::as_str)
-                {
-                    return Err(invalid("messages.name"));
-                }
-                input.push(json!({"type":"function_call_output","call_id":id,"output":content(&m["content"],false)?}));
-            }
-            _ => return Err(invalid("messages.role")),
-        }
+            Ok(())
+        })?;
     }
-    if !pending.is_empty() || input.is_empty() {
-        return Err(invalid("messages"));
-    }
-    b.insert("instructions".into(), json!(instructions.join("\n\n")));
-    b.insert("input".into(), json!(input));
-    tools(&v, true, &mut b)?;
-    if let Some(effort) = v.get("reasoning_effort") {
-        if !effort.is_string() {
-            return Err(invalid("reasoning_effort"));
-        }
-        b.insert(
+    body.insert("instructions".into(), json!(instructions.join("\n\n")));
+    body.insert("input".into(), json!(input));
+    tools(&v, true, &mut body)?;
+    if let Some(effort) = v.get("reasoning_effort").filter(|v| !v.is_null()) {
+        body.insert(
             "reasoning".into(),
             json!({"effort":effort,"summary":"auto"}),
         );
     }
-    let stream = boolean(&v, "stream", false)?;
-    let include_usage = if let Some(o) = v.get("stream_options") {
-        fields(o, &["include_usage"])?;
-        if !stream {
-            return Err(invalid("stream_options"));
-        }
-        boolean(o, "include_usage", false)?
-    } else {
-        false
-    };
+    let stream = boolean(&v, "stream", false);
+    let include_usage = stream && boolean(&v["stream_options"], "include_usage", false);
     Ok(Request {
-        body: Value::Object(b),
+        body: Value::Object(body),
         stream,
         include_usage,
         ignored_parameters,
     })
 }
-
 pub fn normalize_responses(mut v: Value) -> Result<Request, Error> {
-    omit_nulls(
-        &mut v,
-        &[
-            "stream",
-            "store",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "prompt_cache_key",
-            "instructions",
-            "reasoning",
-            "include",
-            "temperature",
-            "top_p",
-            "metadata",
-            "user",
-            "service_tier",
-            "text",
-            "truncation",
-        ],
-    );
-    fields(
-        &v,
-        &[
-            "model",
-            "input",
-            "instructions",
-            "stream",
-            "store",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "reasoning",
-            "include",
-            "prompt_cache_key",
-            "max_output_tokens",
-        ],
-    )?;
-    let ignored_parameters = token_limits(&v, &["max_output_tokens"])?;
-    let mut b = base(&v)?;
-    let mut input = if let Some(s) = v["input"].as_str() {
-        json!([{"role":"user","content":s}])
-    } else {
-        v["input"].clone()
+    let mut body = base(&v)?;
+    let ignored_parameters = ignored_parameters(&v);
+    let mut input = match &v["input"] {
+        Value::String(text) => json!([{"role":"user","content":text}]),
+        Value::Object(_) => json!([v["input"].clone()]),
+        Value::Array(_) => v["input"].clone(),
+        _ => return Err(invalid("input")),
     };
-    let items = input
-        .as_array_mut()
-        .filter(|a| !a.is_empty())
-        .ok_or_else(|| invalid("input"))?;
-    let mut calls = HashSet::new();
-    let mut pending = HashSet::new();
-    for item in items {
-        match item["type"].as_str().unwrap_or("message") {
-            "message" => {
-                fields(item, &["type", "role", "content", "id", "status"])?;
-                if !["user", "assistant", "developer", "system"]
-                    .contains(&item["role"].as_str().unwrap_or(""))
-                {
-                    return Err(invalid("input.role"));
-                }
-                let allows_images = item["role"] == "user";
-                if let Some(parts) = item["content"].as_array_mut() {
-                    for part in parts {
-                        if part["type"] == "input_image" {
-                            if !allows_images {
-                                return Err(invalid("input.content"));
-                            }
-                            *part = input_image(part)?;
-                            continue;
-                        }
-                        if !["input_text", "output_text", "refusal"]
-                            .contains(&part["type"].as_str().unwrap_or(""))
-                        {
-                            return Err(invalid("input.content"));
-                        }
-                        if part["type"] == "refusal" {
-                            string(part, "refusal")?;
-                        } else if !part["text"].is_string() {
-                            return Err(invalid("input.text"));
-                        }
+    // Native items are already in the upstream format. Do not revalidate enums,
+    // text values, tool links, schemas, status or opaque reasoning replay data.
+    for (index, item) in input.as_array_mut().unwrap().iter_mut().enumerate() {
+        if item["role"] == "user" {
+            if let Some(parts) = item["content"].as_array_mut() {
+                for (part_index, part) in parts.iter_mut().enumerate() {
+                    if part["type"] == "input_image" {
+                        let converted =
+                            context(&format!("input[{index}].content[{part_index}]"), || {
+                                input_image(part, "image_url")
+                            })?;
+                        *part = converted;
                     }
-                } else if !item["content"].is_string() {
-                    return Err(invalid("input.content"));
-                }
-                if !pending.is_empty() {
-                    return Err(invalid("input.tool_history"));
                 }
             }
-            "function_call" => {
-                fields(
-                    item,
-                    &["type", "id", "call_id", "name", "arguments", "status"],
-                )?;
-                let id = string(item, "call_id")?;
-                if !calls.insert(id.to_owned()) || !name(string(item, "name")?) {
-                    return Err(invalid("input.function_call"));
-                }
-                args(item, "arguments")?;
-                pending.insert(id.to_owned());
-            }
-            "function_call_output" => {
-                fields(item, &["type", "id", "call_id", "output", "status"])?;
-                if !pending.remove(string(item, "call_id")?) || !item["output"].is_string() {
-                    return Err(invalid("input.function_call_output"));
-                }
-            }
-            "reasoning" => {
-                fields(
-                    item,
-                    &[
-                        "type",
-                        "id",
-                        "summary",
-                        "content",
-                        "encrypted_content",
-                        "status",
-                    ],
-                )?;
-                if let Some(status) = item.get("status").filter(|v| !v.is_null())
-                    && !status
-                        .as_str()
-                        .is_some_and(|s| ["in_progress", "completed", "incomplete"].contains(&s))
-                {
-                    return Err(invalid("input.reasoning.status"));
-                }
-            }
-            _ => return Err(invalid("input.type")),
-        }
-    }
-    if !pending.is_empty() {
-        return Err(invalid("input.tool_history"));
-    }
-    b.insert("input".into(), input);
-    if let Some(i) = v.get("instructions") {
-        if !i.is_string() {
-            return Err(invalid("instructions"));
-        }
-        b.insert("instructions".into(), i.clone());
-    }
-    if let Some(r) = v.get_mut("reasoning") {
-        omit_nulls(r, &["effort", "summary"]);
-        fields(r, &["effort", "summary"])?;
-        for key in ["effort", "summary"] {
-            if r.get(key).is_some_and(|v| !v.is_string()) {
-                return Err(invalid("reasoning"));
-            }
-        }
-        b.insert("reasoning".into(), r.clone());
-    }
-    if let Some(include) = v.get("include") {
-        if !include
+        } else if item["content"]
             .as_array()
-            .is_some_and(|a| a.iter().all(|i| i == "reasoning.encrypted_content"))
+            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "input_image"))
         {
-            return Err(invalid("include"));
+            return Err(invalid_because(
+                "content",
+                "图片入口仅支持 user 消息；建议：将图片放入 user 消息",
+            )
+            .at(&format!("input[{index}]")));
         }
-        b.insert("include".into(), include.clone());
     }
-    tools(&v, false, &mut b)?;
+    body.insert("input".into(), input);
+    for key in ["instructions", "include"] {
+        if let Some(value) = v.get(key).filter(|v| !v.is_null()) {
+            body.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(reasoning) = v.get_mut("reasoning").filter(|v| !v.is_null()) {
+        omit_nulls(reasoning, &["effort", "summary"]);
+        body.insert("reasoning".into(), reasoning.clone());
+    }
+    tools(&v, false, &mut body)?;
     Ok(Request {
-        body: Value::Object(b),
-        stream: boolean(&v, "stream", false)?,
+        body: Value::Object(body),
+        stream: boolean(&v, "stream", false),
         include_usage: false,
         ignored_parameters,
     })
@@ -944,7 +730,14 @@ impl Projection {
                                 .map(|(k, _)| *k)
                                 .unwrap_or(position as u64);
                             if complete {
-                                args(item, "arguments")?;
+                                // Trusting client history does not make a malformed
+                                // upstream tool result a valid completed response.
+                                let arguments = item["arguments"].as_str().ok_or_else(protocol)?;
+                                if !serde_json::from_str::<Value>(arguments)
+                                    .is_ok_and(|v| v.is_object())
+                                {
+                                    return Err(protocol());
+                                }
                             }
                             self.update_tool(
                                 key,

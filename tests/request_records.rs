@@ -5,6 +5,45 @@ fn record(id: &str, started_at: i64) -> RequestRecord {
 }
 
 #[tokio::test]
+async fn failure_details_are_available_independently_of_the_exception_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.db");
+    let store = Store::open(&path).await.unwrap();
+    for index in 0..101 {
+        let mut request = record(&format!("request-{index}"), 1000 + index);
+        store.start_request(&request).await.unwrap();
+        request.outcome = "failed".into();
+        request.ended_at = Some(2000 + index);
+        let failure = FailureRecord {
+            request_id: request.id.clone(),
+            occurred_at: 2000 + index,
+            phase: "validating".into(),
+            code: "unsupported_or_invalid_parameter".into(),
+            message: "参数 model：必须是非空字符串；建议：提供模型 ID".into(),
+            http_status: 400,
+        };
+        store
+            .finish_request(&request, Some(&failure))
+            .await
+            .unwrap();
+    }
+    assert!(
+        !store
+            .failure_records(0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.request_id == "request-0")
+    );
+    store.close().await;
+    let store = Store::open(&path).await.unwrap();
+    let failure = store.failure_record("request-0").await.unwrap().unwrap();
+    assert_eq!(failure.request_id, "request-0");
+    assert!(failure.message.contains("model"));
+    assert!(store.failure_record("missing").await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn request_and_failure_records_persist_separately_and_completion_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("app.db");

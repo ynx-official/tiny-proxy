@@ -51,9 +51,9 @@ Windows 的关闭窗口由退出改为收起，需要从托盘或设置显式退
 
 旧提交 c55f8d8 在跳测策略接入前自动触发 [检查 38502872581](https://github.com/ynx-official/tiny-proxy/actions/runs/38502872581)，macOS 的 Rust 测试步骤已经完成，Windows 测试步骤已取消；整个旧任务已取消。本次不重复执行测试，也不将旧任务当作本版完整测试结果。
 
-本机发布资料校验通过；[原生检查 38503379464](https://github.com/ynx-official/tiny-proxy/actions/runs/38503379464) 的两平台格式及 Clippy 均通过，Rust/Python 测试步骤明确 skipped。macOS 整体检查已完成，Windows 的额外 release 构建仍在收尾。
+本机发布资料校验通过；[原生检查 38503379464](https://github.com/ynx-official/tiny-proxy/actions/runs/38503379464) 的两平台格式及 Clippy 均通过，Rust/Python 测试步骤明确 skipped。该预检后续已完成；标签对应的 [原生检查 38504634317](https://github.com/ynx-official/tiny-proxy/actions/runs/38504634317) 也已在两平台成功，Rust/Python 测试步骤均 skipped。
 
-[四包预检 38503289749](https://github.com/ynx-official/tiny-proxy/actions/runs/38503289749) 在提交 2b591a655d032331787fa45e0de2f27cfe52eabd 上完成两平台 release 编译、安装/便携打包与上传；发布工具测试 skipped。后续提交目前只有文档变化，生产代码、Cargo、打包脚本与工作流已核对一致。v1.1.0 标签工作流将重新构建并正式发布，公开清单和四包核对结果在完成后补记。本机不启动新版窗口或安装器，不使用真实数据库进行迁移演练。
+[四包预检 38503289749](https://github.com/ynx-official/tiny-proxy/actions/runs/38503289749) 在提交 2b591a655d032331787fa45e0de2f27cfe52eabd 上完成两平台 release 编译、安装/便携打包与上传；发布工具测试 skipped。后续提交目前只有文档变化，生产代码、Cargo、打包脚本与工作流已核对一致。v1.1.0 标签的 [正式发布 38504634251](https://github.com/ynx-official/tiny-proxy/actions/runs/38504634251) 已成功，2026-10-14 03:21:55 UTC 公开六个资产（四包、说明与清单）；此处记录上传事实，不将其当作安装或清单逐项校验结果。本机不启动新版窗口或安装器，不使用真实数据库进行迁移演练。
 
 ## 变更依据
 

@@ -199,7 +199,7 @@ async fn validation_auth_and_stream_failures_have_separate_exception_rows() {
     let response = client
         .post(format!("http://{}/v1/responses", f.gateway.address))
         .bearer_auth(f.key.value.as_str())
-        .json(&json!({"model":"fixture","input":"private input","private-field-name":true}))
+        .json(&json!({"model":"fixture","input":42,"private-field-name":"private input"}))
         .send()
         .await
         .unwrap();
@@ -249,6 +249,107 @@ async fn validation_auth_and_stream_failures_have_separate_exception_rows() {
         errors.iter().find(|e| e.request_id == id).unwrap().code,
         "upstream_failed"
     );
+}
+
+#[tokio::test]
+async fn parameter_error_response_and_persisted_diagnostic_include_the_same_known_path() {
+    let mut f = Fixture::new().await;
+    let client = reqwest::Client::new();
+    for (route, body, path, rule) in [
+        (
+            "chat/completions",
+            json!({"model":"fixture","messages":{},"private-field-name":"private prompt"}),
+            "messages",
+            "数组",
+        ),
+        (
+            "chat/completions",
+            json!({"model":"fixture","messages":[{"role":"assistant","content":"private reply","tool_calls":[{"function":{"name":"lookup","arguments":"{}"}}]}]}),
+            "messages[0].tool_calls[0].id",
+            "非空字符串",
+        ),
+        (
+            "responses",
+            json!({"model":"fixture","input":42,"private-field-name":"private input","max_output_tokens":"1024"}),
+            "input",
+            "输入对象",
+        ),
+        (
+            "responses",
+            json!({"model":"fixture","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.test/private-image"}]}]}),
+            "input[0].content[0].image_url",
+            "Base64",
+        ),
+    ] {
+        let response = client
+            .post(format!("http://{}/v1/{route}", f.gateway.address))
+            .bearer_auth(f.key.value.as_str())
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "unsupported_or_invalid_parameter");
+        assert_eq!(error["error"]["param"], path);
+        let record = f.store.request_record(&id).await.unwrap().unwrap();
+        assert_eq!(record.phase, "validating");
+        assert_eq!(record.upstream_status, None);
+        assert_eq!(record.first_byte_at, None);
+        let failure = f.store.failure_record(&id).await.unwrap().unwrap();
+        assert!(failure.message.contains(path));
+        assert!(failure.message.contains(rule));
+        assert!(failure.message.contains("建议"));
+        assert_eq!(f.active.load(Ordering::SeqCst), 0);
+    }
+    for (route, mut body) in [
+        (
+            "chat/completions",
+            json!({"model":"fixture","messages":[{"role":"user","content":"private prompt"}]}),
+        ),
+        (
+            "responses",
+            json!({"model":"fixture","input":"private input"}),
+        ),
+    ] {
+        body["private-field-name"] = json!("private field value");
+        body["model"] = Value::Null;
+        let response = client
+            .post(format!("http://{}/v1/{route}", f.gateway.address))
+            .bearer_auth(f.key.value.as_str())
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["param"], "model");
+        let failure = f.store.failure_record(&id).await.unwrap().unwrap();
+        assert!(failure.message.contains("model"));
+        assert!(!failure.message.contains("private-field-name"));
+    }
+    f.gateway.stop().await;
+    f.store.close().await;
+    let raw = std::fs::read(f._dir.path().join("app.db")).unwrap();
+    for secret in [
+        "private prompt",
+        "private reply",
+        "private input",
+        "private-image",
+        "private-field-name",
+        "private field value",
+        f.key.value.as_str(),
+    ] {
+        assert!(!raw.windows(secret.len()).any(|w| w == secret.as_bytes()));
+    }
 }
 
 #[tokio::test]

@@ -15,6 +15,8 @@
 
 ## 当前结论
 
+2026-10-14 参数诊断之后，用户明确要求默认信任下游字段，权威规则见 [宽松请求契约](03-architecture/api-contracts.md#默认信任下游字段2026-10-14)，旧方案已 [归档](99-archive/api-contracts-strict-validation-2026-10-14.md)。A17 系列及 A55/A56 已更新，新增 A58；必要转换错误仍使用具体诊断，见 [本地参数校验诊断](03-architecture/api-contracts.md#本地参数校验诊断2026-10-14)、[操作说明](05-operations/request-diagnostics.md#参数校验失败怎么处理2026-10-14) 和 [待测清单](04-quality/request-records-checklist.md)。本次为源码及回归代码交付，未编译、运行测试或更新 EXE。
+
 技术栈、个人使用、纯桌面、局域网及个人 VPN 范围已经确认。推荐单进程模块化应用，内嵌 Axum 网关，由 Tokio 承担后台任务。
 
 用户已明确批准采用参考项目的 Codex 设备码认证与 Codex 专用模型端点。详见 [认证 ADR 0003](03-architecture/adr/0003-codex-device-gateway.md)。
@@ -40,10 +42,10 @@
 | 决策记录 | [桌面技术栈](03-architecture/adr/0001-desktop-stack.md)、[Codex 路线](03-architecture/adr/0003-codex-device-gateway.md)、[本地账号状态与额度](03-architecture/adr/0004-local-account-state.md)、[历史认证候选](99-archive/adr-0002-siwc-candidate.md) |
 | 质量 | [验证计划](04-quality/verification-plan.md)、[请求记录测试清单](04-quality/request-records-checklist.md)、[主题验证清单](04-quality/theme-checklist.md)、[Windows 启动与托盘清单](04-quality/desktop-lifecycle-checklist.md)、[数据库启动兼容清单](04-quality/database-startup-checklist.md) |
 | 使用与维护 | [桌面运行、接入和恢复](05-operations/desktop-operations.md)、[请求记录与长耗时诊断](05-operations/request-diagnostics.md) |
-| 归档 | [早期认证方案](99-archive/siwc-authentication.md)、[早期验证记录](99-archive/siwc-probe-implementation.md) |
+| 归档 | [已替代的严格请求校验](99-archive/api-contracts-strict-validation-2026-10-14.md)、[早期认证方案](99-archive/siwc-authentication.md)、[早期验证记录](99-archive/siwc-probe-implementation.md) |
 | 交付 | [分阶段开发计划](06-delivery/development-plan.md)、[开发验证记录](06-delivery/implementation-status.md) |
 | 在线更新 | [架构与凭据决定](03-architecture/adr/0005-online-update-release.md)、[构建与更新操作](05-operations/build-and-package.md)、[测试清单](04-quality/online-update-checklist.md) |
-| 发版资料 | [发版流程](06-delivery/release-process.md)、[版本总览](upgrade/README.md)、[v1.1.0 托盘与迁移兼容](upgrade/v1.1.0/README.md)、[v1.0.0 首版详情](upgrade/v1.0.0/README.md)、[v0.1.0 开发记录](upgrade/v0.1.0/README.md)、[CHANGELOG](../CHANGELOG.md) |
+| 发版资料 | [发版流程](06-delivery/release-process.md)、[版本总览](upgrade/README.md)、[v1.1.1 请求兼容与诊断](upgrade/v1.1.1/README.md)、[v1.1.0 托盘与迁移兼容](upgrade/v1.1.0/README.md)、[v1.0.0 首版详情](upgrade/v1.0.0/README.md)、[v0.1.0 开发记录](upgrade/v0.1.0/README.md)、[CHANGELOG](../CHANGELOG.md) |
 
 2026-10-13 用户要求增加白天模式并默认跟随电脑；行为与配色见 [桌面视觉系统](02-design/visual-system.md#白天模式与跟随电脑)，对应 A-theme-01—A-theme-04。源码阶段未执行编译或测试；首版授权后的双平台自动测试与打包结果见 [v1.0.0 验证记录](upgrade/v1.0.0/README.md#验证结果)，桌面主题实机验收仍见 [主题清单](04-quality/theme-checklist.md)。
 

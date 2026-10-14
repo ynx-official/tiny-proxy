@@ -165,6 +165,8 @@ struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    param: Option<String>,
+    diagnostic: Option<String>,
 }
 impl ApiError {
     fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
@@ -172,15 +174,24 @@ impl ApiError {
             status: StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             code,
             message: message.into(),
+            param: None,
+            diagnostic: None,
         }
     }
     fn value(&self) -> Value {
-        json!({"error":{"type":if self.status==StatusCode::BAD_REQUEST {"invalid_request_error"} else {"gateway_error"},"code":self.code,"message":self.message}})
+        let mut value = json!({"error":{"type":if self.status==StatusCode::BAD_REQUEST {"invalid_request_error"} else {"gateway_error"},"code":self.code,"message":self.message}});
+        if let Some(param) = &self.param {
+            value["error"]["param"] = json!(param);
+        }
+        value
     }
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let info = FailureInfo::new(self.code, self.status.as_u16());
+        let mut info = FailureInfo::new(self.code, self.status.as_u16());
+        if let Some(message) = &self.diagnostic {
+            info.message = message.clone();
+        }
         let mut response = (self.status, Json(self.value())).into_response();
         response.extensions_mut().insert(info);
         response
@@ -216,7 +227,15 @@ fn cancelled() -> ApiError {
     )
 }
 fn request_error(e: gateway::Error) -> ApiError {
-    ApiError::new(400, "unsupported_or_invalid_parameter", e.to_string())
+    let diagnostic = e.diagnostic_message();
+    let mut error = ApiError::new(
+        400,
+        "unsupported_or_invalid_parameter",
+        format!("{e}; {diagnostic}"),
+    );
+    error.param = Some(e.param);
+    error.diagnostic = Some(diagnostic);
+    error
 }
 fn parse_json(v: Result<Bytes, BytesRejection>, trace: &Trace) -> Result<Value, ApiError> {
     let bytes = v.map_err(|e| {
@@ -506,6 +525,7 @@ async fn generate(
     chat: bool,
 ) -> Response {
     let ignored = request.ignored_parameters.join(", ");
+    trace.update(|record| record.stream = Some(request.stream));
     let mut warnings = vec![];
     if request.ignored_parameters.iter().any(|parameter| {
         matches!(
@@ -520,6 +540,19 @@ async fn generate(
         .contains(&"messages[].reasoning_content")
     {
         warnings.push("Assistant reasoning_content is not replayed to the Codex upstream");
+    }
+    if request.ignored_parameters.iter().any(|p| {
+        !matches!(
+            *p,
+            "max_tokens"
+                | "max_completion_tokens"
+                | "max_output_tokens"
+                | "messages[].reasoning_content"
+        )
+    }) {
+        warnings.push(
+            "Unsupported client options are ignored; the gateway uses one result and store=false",
+        );
     }
     let mut response = generate_response(s, key, trace, request, chat).await;
     if !ignored.is_empty() {

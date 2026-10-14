@@ -82,7 +82,7 @@ fn assistant_refusal_is_preserved_as_native_content_instead_of_discarded() {
 }
 
 #[test]
-fn known_optional_nulls_are_absent_but_required_and_unknown_fields_stay_strict() {
+fn optional_nulls_and_unknown_fields_are_accepted_but_model_is_required() {
     let streaming = normalize_chat(json!({"model":"fixture","stream":true,
         "stream_options":{"include_usage":null},"messages":[{"role":"user","content":"hi"}]}))
     .unwrap();
@@ -147,7 +147,11 @@ fn known_optional_nulls_are_absent_but_required_and_unknown_fields_stay_strict()
         ] {
             let mut body = base.clone();
             body[field] = value;
-            assert!(normalize(body).is_err(), "must reject {field}");
+            if field == "model" {
+                assert!(normalize(body).is_err(), "model is required");
+            } else {
+                assert!(normalize(body).is_ok(), "must accept {field}");
+            }
         }
     }
 }
@@ -203,8 +207,9 @@ fn empty_function_schema_and_nullable_tool_options_work_for_both_protocols() {
             } else {
                 &mut invalid["tools"][0]
             };
-            function[key] = value;
-            assert!(normalize(invalid).is_err(), "chat={chat} {key}");
+            function[key] = value.clone();
+            let actual = normalize(invalid).unwrap();
+            assert_eq!(actual.body["tools"][0][key], value, "chat={chat} {key}");
         }
     }
 }
@@ -221,12 +226,14 @@ fn responses_reasoning_replay_preserves_valid_status_and_opaque_payloads() {
     assert_eq!(actual.body["reasoning"], json!({"summary":"auto"}));
     for status in [json!("unknown"), json!(1), json!({})] {
         let mut invalid_item = item.clone();
-        invalid_item["status"] = status;
-        assert!(normalize_responses(json!({"model":"fixture","input":[invalid_item]})).is_err());
+        invalid_item["status"] = status.clone();
+        let request =
+            normalize_responses(json!({"model":"fixture","input":[invalid_item]})).unwrap();
+        assert_eq!(request.body["input"][0]["status"], status);
     }
 }
 
-fn invalid_histories() -> Vec<Value> {
+fn trusted_histories() -> Vec<Value> {
     let mut cases = vec![];
     for value in [json!(-1), json!(0.5), json!("0"), json!(true), json!({})] {
         let mut body = history();
@@ -275,9 +282,13 @@ fn invalid_histories() -> Vec<Value> {
 }
 
 #[test]
-fn compatibility_does_not_drop_unknown_data_or_relax_tool_history_integrity() {
-    for body in invalid_histories() {
-        assert!(normalize_chat(body).is_err());
+fn client_metadata_and_tool_history_are_left_for_upstream_validation() {
+    for body in trusted_histories() {
+        let expected_id = body["messages"][1]["tool_calls"][0]["id"].clone();
+        let expected_args = body["messages"][1]["tool_calls"][0]["function"]["arguments"].clone();
+        let request = normalize_chat(body).unwrap();
+        assert_eq!(request.body["input"][1]["call_id"], expected_id);
+        assert_eq!(request.body["input"][1]["arguments"], expected_args);
     }
 }
 
@@ -406,7 +417,7 @@ async fn http_client_can_replay_aggregated_stream_tools_then_continue_in_json_an
     }
     let count = seen.lock().unwrap().len();
     assert_eq!(count, 6);
-    for body in invalid_histories() {
+    for body in trusted_histories() {
         let response = http
             .post(&url)
             .bearer_auth(key.value.as_str())
@@ -414,13 +425,16 @@ async fn http_client_can_replay_aggregated_stream_tools_then_continue_in_json_an
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 400);
+        assert_eq!(response.status(), 200);
         assert_eq!(
-            response.json::<Value>().await.unwrap()["error"]["code"],
-            "unsupported_or_invalid_parameter"
+            response.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
+            "continued"
         );
     }
-    assert_eq!(seen.lock().unwrap().len(), count);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        count + trusted_histories().len()
+    );
     gateway.stop().await;
     task.abort();
 }

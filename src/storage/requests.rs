@@ -62,7 +62,7 @@ pub struct FailureRecord {
     pub occurred_at: i64,
     pub phase: String,
     pub code: String,
-    /// A gateway-owned diagnostic; never an upstream body or user-controlled field.
+    /// Code-owned field paths and rules; never arbitrary field names, values or upstream bodies.
     pub message: String,
     pub http_status: i64,
 }
@@ -168,6 +168,14 @@ impl Store {
         .bind(offset.max(0))
         .fetch_all(&self.pool)
         .await?)
+    }
+    pub async fn failure_record(&self, request_id: &str) -> Result<Option<FailureRecord>, Error> {
+        Ok(
+            sqlx::query_as("SELECT * FROM failure_records WHERE request_id=?")
+                .bind(request_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
     }
     pub async fn record_counts(&self) -> Result<(i64, i64), Error> {
         Ok(sqlx::query_as(

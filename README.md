@@ -113,12 +113,12 @@ OAuth Token 仅由本机用于固定 Codex 上游。外部客户端不能管理�
 | 场景 | 当前处理 |
 |---|---|
 | 图片输入 | 仅支持 `user` 消息中的 Base64 PNG / JPEG / WebP / GIF，保留图文顺序与 `detail`；不下载图片网址 |
-| 输出长度 | 接收 `max_tokens` / `max_completion_tokens` / `max_output_tokens` 的正整数或 `null`；正整数不传给 Codex、不限制输出，通过响应头提示 |
-| Chat 推理历史 | 接收 assistant 消息的 `reasoning_content` 字符串 / `null`；推理文本不回放，非空值通过响应头提示 |
-| 工具与空值 | 兼容已列明的 `tool_calls[].index`、匹配的工具结果 `name`、assistant 拒绝信息与可选 `null`；无参数工具可省略 `parameters` |
-| 未支持内容 | 未知字段、非用户消息图片、托管工具，以及 `temperature` 等未支持字段的非空值，明确报错 |
+| 输出长度 | 三种长度字段的任意非空值接收后跳过，不限制上游输出；响应头固定提示 |
+| Chat 推理历史 | reasoning_content 任意类型接收后跳过，不拼入正文；assistant 非空值固定提示未回放 |
+| 工具与空值 | 默认信任历史/元数据，不检查 index、冗余 name、配对或 schema 枚举；转换仍需要消息结构与调用 ID/函数名 |
+| 字段信任与边界 | 未知字段与采样参数默认接收；顶层用不到的字段跳过，原生值由上游判断；保留 JSON 与必要协议/图片转换要求 |
 
-字段定义、响应头与错误契约以 [API 契约](docs/03-architecture/api-contracts.md) 为准。图片转换已有自动测试，真实 Codex 图片调用及客户端重试尚待验证。
+2026-10-14 用户要求默认信任下游字段，v1.1.1 按上述规则放松，构建/发布与跳过测试的实际状态见 [版本详情](docs/upgrade/v1.1.1/README.md)。字段定义、响应头与错误契约以 [API 契约](docs/03-architecture/api-contracts.md) 为准。图片转换已有自动测试，真实 Codex 图片调用及客户端重试尚待验证。
 
 ### 运行限制
 

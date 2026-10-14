@@ -101,8 +101,17 @@ fn request_phase(value: &str) -> &'static str {
     }
 }
 fn latency(start: i64, time: Option<i64>) -> String {
-    time.map(|time| format!("{:.2} 秒", (time - start).max(0) as f64 / 1000.))
+    time.map(|time| request_duration((time - start).max(0)))
         .unwrap_or_else(|| "尚未收到".into())
+}
+
+fn request_duration(milliseconds: i64) -> String {
+    let milliseconds = milliseconds.max(0);
+    if milliseconds < 10 {
+        format!("{milliseconds} 毫秒")
+    } else {
+        format!("{:.2} 秒", milliseconds as f64 / 1000.)
+    }
 }
 
 // Rendering and clipboard export share these lines so copied diagnostics match
@@ -122,7 +131,7 @@ fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec
         ),
         format!("开始：{}", request_time(Some(record.started_at))),
         format!(
-            "{}：{} · {} {:.2} 秒",
+            "{}：{} · {} {}",
             if record.outcome == "interrupted" {
                 "恢复确认时间"
             } else {
@@ -138,7 +147,7 @@ fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec
             } else {
                 "耗时"
             },
-            record.elapsed_ms as f64 / 1000.
+            request_duration(record.elapsed_ms)
         ),
         format!(
             "{}：{}",
@@ -191,6 +200,12 @@ fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec
         ),
         format!("请求 ID：{}", record.id),
     ];
+    if record.phase == "validating"
+        && record.http_status == Some(400)
+        && record.upstream_status.is_none()
+    {
+        metadata.push("处理位置：本地参数校验，尚未发送到上游；请按异常原因修改客户端请求".into());
+    }
     if let Some(failure) = failure.filter(|failure| failure.request_id == record.id) {
         metadata.push(format!("异常代码：{}", failure.code));
         metadata.push(format!("异常原因：{}", failure.message));
@@ -238,6 +253,8 @@ struct Desktop {
     failure_page: i64,
     show_failures: bool,
     selected_request: Option<Record>,
+    selected_failure: Option<FailureRecord>,
+    requested_detail: Option<String>,
     log_write_failures: u64,
     bind_address: Entity<InputState>,
     models: Vec<Model>,
@@ -356,6 +373,8 @@ impl Desktop {
             failure_page: 0,
             show_failures: false,
             selected_request: None,
+            selected_failure: None,
+            requested_detail: None,
             log_write_failures: 0,
             bind_address: cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1:8787")),
             models: vec![],
@@ -475,10 +494,35 @@ impl Desktop {
                     self.gateway_address = address;
                 }
                 Event::History(history) => {
+                    let mut selected_finished = false;
                     if let Some(selected) = &mut self.selected_request
                         && let Some(current) = history.requests.iter().find(|r| r.id == selected.id)
                     {
+                        selected_finished =
+                            selected.ended_at.is_none() && current.ended_at.is_some();
                         *selected = current.clone();
+                    }
+                    if let Some(selected) = &self.selected_request
+                        && self.requested_detail.as_deref() == Some(selected.id.as_str())
+                    {
+                        if let Some(failure) = history
+                            .failures
+                            .iter()
+                            .find(|f| f.request_id == selected.id)
+                        {
+                            self.selected_failure = Some(failure.clone());
+                        } else if selected_finished
+                            && self.selected_failure.is_none()
+                            && matches!(
+                                selected.outcome.as_str(),
+                                "failed" | "cancelled" | "incomplete" | "interrupted"
+                            )
+                        {
+                            // A live selection may finish outside the current exception
+                            // page. Fetch its own failure rather than rely on pagination.
+                            let id = selected.id.clone();
+                            self.send(Command::RequestDetail(id), cx);
+                        }
                     }
                     self.records = history.requests;
                     self.failures = history.failures;
@@ -488,7 +532,12 @@ impl Desktop {
                     self.failure_page = history.failure_page;
                     self.log_write_failures = history.write_failures;
                 }
-                Event::RequestDetail(record) => self.selected_request = Some(*record),
+                Event::RequestDetail { record, failure } => {
+                    if self.requested_detail.as_deref() == Some(record.id.as_str()) {
+                        self.selected_request = Some(*record);
+                        self.selected_failure = failure;
+                    }
+                }
                 Event::GatewayBind(address) => {
                     self.bind_address
                         .update(cx, |input, cx| input.set_value(address, window, cx));
@@ -584,9 +633,19 @@ impl Desktop {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        let detail_id = match &command {
+            Command::RequestDetail(id) => Some(id.clone()),
+            _ => None,
+        };
         if self.commands.try_send(command).is_err() {
             self.status = "后台忙碌或已经退出，请稍后重试".into();
             self.error = true;
+        } else if let Some(id) = detail_id {
+            if self.selected_request.as_ref().is_some_and(|r| r.id != id) {
+                self.selected_request = None;
+                self.selected_failure = None;
+            }
+            self.requested_detail = Some(id);
         }
         cx.notify();
     }
@@ -917,11 +976,7 @@ impl Desktop {
             )));
         }
         if let Some(record) = &self.selected_request {
-            let failure = self
-                .failures
-                .iter()
-                .find(|failure| failure.request_id == record.id);
-            let metadata = request_detail_lines(record, failure);
+            let metadata = request_detail_lines(record, self.selected_failure.as_ref());
             let detail_text = format!("请求详情\n{}", metadata.join("\n"));
             view = view.child(
                 div()
@@ -951,6 +1006,8 @@ impl Desktop {
                             .child(Button::new("close-request-detail").label("收起").on_click(
                                 cx.listener(|this, _, _, cx| {
                                     this.selected_request = None;
+                                    this.selected_failure = None;
+                                    this.requested_detail = None;
                                     cx.notify();
                                 }),
                             )),
@@ -1596,6 +1653,31 @@ mod request_detail_tests {
             "/v1/chat/completions".into(),
             1_000,
         )
+    }
+
+    #[test]
+    fn fast_validation_details_preserve_milliseconds_and_parameter_guidance() {
+        let mut record = record();
+        record.outcome = "failed".into();
+        record.phase = "validating".into();
+        record.ended_at = Some(1_005);
+        record.elapsed_ms = 5;
+        record.http_status = Some(400);
+        let failure = FailureRecord {
+            request_id: record.id.clone(),
+            occurred_at: 1_005,
+            phase: "validating".into(),
+            code: "unsupported_or_invalid_parameter".into(),
+            message:
+                "参数 messages[1].tool_calls[0].id：调用 ID 必须是非空字符串；建议：提供调用 ID"
+                    .into(),
+            http_status: 400,
+        };
+        let text = request_detail_lines(&record, Some(&failure)).join("\n");
+        assert!(text.contains("耗时 5 毫秒"));
+        assert!(!text.contains("耗时 0.00 秒"));
+        assert!(text.contains(&format!("异常原因：{}", failure.message)));
+        assert!(text.contains("尚未发送到上游"));
     }
 
     #[test]

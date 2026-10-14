@@ -723,22 +723,20 @@ impl Service {
     ) -> Result<reqwest::Response, Error> {
         let bundle = self.credentials_for(account).await?;
         let models = self.catalog(&bundle).await?;
-        let model = models
+        models
             .iter()
             .find(|m| Some(m.slug.as_str()) == body["model"].as_str())
             .ok_or(Error::Model)?;
-        if let Some(effort) = body["reasoning"]["effort"].as_str()
-            && !model.reasoning_efforts.iter().any(|s| s == effort)
-        {
-            return Err(Error::Protocol);
-        }
         let mut request = self
             .request(reqwest::Method::POST, "/responses", &bundle)
             .header("accept", "text/event-stream");
-        if let Some(cache) = body["prompt_cache_key"].as_str() {
+        if let Some(cache) = body["prompt_cache_key"]
+            .as_str()
+            .and_then(|value| reqwest::header::HeaderValue::from_str(value).ok())
+        {
             request = request
-                .header("session-id", cache)
-                .header("thread-id", cache)
+                .header("session-id", cache.clone())
+                .header("thread-id", cache.clone())
                 .header("x-client-request-id", cache);
         }
         let response = request.json(body).send().await.map_err(network)?;

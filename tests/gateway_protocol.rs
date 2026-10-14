@@ -18,17 +18,16 @@ fn chat_history_converts_instructions_and_tool_roundtrip_without_changing_argume
 }
 
 #[test]
-fn unsupported_fields_and_orphan_tool_output_are_not_silently_dropped() {
+fn unused_fields_and_orphan_tool_outputs_are_accepted_for_upstream_validation() {
     assert!(
         normalize_chat(
             json!({"model":"m","messages":[{"role":"user","content":"hi"}],"temperature":0.2})
         )
-        .is_err()
+        .is_ok()
     );
-    assert!(normalize_chat(json!({"model":"m","messages":[{"role":"tool","tool_call_id":"unknown","content":"result"}]})).is_err());
+    assert!(normalize_chat(json!({"model":"m","messages":[{"role":"tool","tool_call_id":"unknown","content":"result"}]})).is_ok());
     assert!(
-        normalize_responses(json!({"model":"m","input":"hi","previous_response_id":"old"}))
-            .is_err()
+        normalize_responses(json!({"model":"m","input":"hi","previous_response_id":"old"})).is_ok()
     );
     assert!(normalize_chat(json!({"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]})).is_err());
 }
@@ -59,7 +58,7 @@ fn token_limits_are_accepted_without_forwarding_them_to_codex() {
 }
 
 #[test]
-fn malformed_token_limits_are_still_rejected() {
+fn unused_token_limit_values_are_not_locally_validated() {
     for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
         for value in [
             json!(0),
@@ -81,9 +80,72 @@ fn malformed_token_limits_are_still_rejected() {
             } else {
                 normalize_chat(body)
             };
-            let error = result.err().expect("invalid token limit must fail");
-            assert_eq!(error.param, field);
+            let request = result.expect("unused output limit must not block conversion");
+            assert!(request.body.get(field).is_none());
+            assert!(request.ignored_parameters.contains(&field));
         }
+    }
+}
+
+#[test]
+fn conversion_errors_locate_the_required_structure_without_echoing_values() {
+    for (chat, body, path, rule) in [
+        (
+            true,
+            json!({"model":null,"messages":[],"private-field":true}),
+            "model",
+            "非空字符串",
+        ),
+        (true, json!({"model":"m","messages":{}}), "messages", "数组"),
+        (
+            true,
+            json!({"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c1","function":{"arguments":"private arguments"}}]}]}),
+            "messages[0].tool_calls[0].function.name",
+            "非空字符串",
+        ),
+        (
+            true,
+            json!({"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/private-image"}}]}]}),
+            "messages[0].content[0].image_url.url",
+            "Base64",
+        ),
+        (
+            true,
+            json!({"model":"m","messages":[],"tools":{}}),
+            "tools",
+            "数组",
+        ),
+        (false, json!({"model":"m","input":42}), "input", "输入对象"),
+    ] {
+        let error = (if chat {
+            normalize_chat(body)
+        } else {
+            normalize_responses(body)
+        })
+        .err()
+        .expect("required structure must fail");
+        assert_eq!(error.param, path);
+        let diagnostic = error.diagnostic_message();
+        assert!(diagnostic.contains(path));
+        assert!(diagnostic.contains(rule));
+        assert!(diagnostic.contains("建议"));
+        assert!(!diagnostic.contains("private"));
+    }
+}
+
+#[test]
+fn unknown_fields_do_not_interfere_with_conversion_or_enter_chat_prompts() {
+    for field in [
+        "private-field-name",
+        "temperature.private-token",
+        "private\nsecret",
+        "object",
+    ] {
+        let mut body = json!({"model":"m","messages":[{"role":"user","content":"prompt"}]});
+        body["messages"][0][field] = json!("private field value");
+        let request = normalize_chat(body).unwrap();
+        assert_eq!(request.body["input"][0]["content"][0]["text"], "prompt");
+        assert!(!request.body.to_string().contains("private"));
     }
 }
 
@@ -92,6 +154,27 @@ fn created() -> Value {
 }
 fn call(index: u64, name: &str, args: &str) -> Value {
     json!({"id":format!("item_{index}"),"type":"function_call","call_id":format!("call_{index}"),"name":name,"arguments":args,"status":"completed"})
+}
+
+#[test]
+fn trusting_client_arguments_does_not_relax_completed_upstream_tool_integrity() {
+    let request = normalize_chat(
+        json!({"model":"m","messages":[{"role":"assistant","tool_calls":[
+            {"id":"c1","function":{"name":"read_file","arguments":"partial{"}}
+        ]}]}),
+    )
+    .unwrap();
+    assert_eq!(request.body["input"][0]["arguments"], "partial{");
+    for arguments in ["partial{", "[]", "null"] {
+        let mut projection = Projection::new("m".into(), false);
+        projection.accept(&created()).unwrap();
+        let terminal = json!({"type":"response.completed","response":{"id":"resp_1","created_at":1234,
+            "model":"m","status":"completed","output":[call(0,"read_file",arguments)]}});
+        assert!(
+            projection.accept(&terminal).is_err(),
+            "invalid completed tool arguments must fail"
+        );
+    }
 }
 
 #[test]

@@ -206,12 +206,16 @@ async fn full_device_login_and_gateway_text_stream_require_independent_key() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 400);
+        assert_eq!(response.status(), 200);
         assert!(
-            response.json::<serde_json::Value>().await.unwrap()["error"]["message"]
-                .as_str()
+            response.headers()["x-tiny-proxy-ignored-parameters"]
+                .to_str()
                 .unwrap()
                 .contains(field)
+        );
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
+            "你好"
         );
         request[field] = serde_json::Value::Null;
         let response = http
@@ -254,12 +258,16 @@ async fn full_device_login_and_gateway_text_stream_require_independent_key() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 400);
+        assert_eq!(response.status(), 200);
         assert!(
-            response.json::<serde_json::Value>().await.unwrap()["error"]["message"]
-                .as_str()
+            response.headers()["x-tiny-proxy-ignored-parameters"]
+                .to_str()
                 .unwrap()
                 .contains(field)
+        );
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["choices"][0]["message"]["content"],
+            "你好"
         );
     }
     let response = http.post(format!("{url}/v1/chat/completions"))
@@ -295,7 +303,7 @@ async fn full_device_login_and_gateway_text_stream_require_independent_key() {
             "invalid_gateway_key"
         );
     }
-    assert_eq!(count.load(Ordering::SeqCst), 13);
+    assert_eq!(count.load(Ordering::SeqCst), 19);
     gateway.stop().await;
     assert!(
         tokio::net::TcpStream::connect(gateway.address)

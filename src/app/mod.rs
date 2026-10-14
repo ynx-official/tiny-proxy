@@ -71,7 +71,10 @@ pub enum Event {
         address: Option<String>,
     },
     History(Box<HistorySnapshot>),
-    RequestDetail(Box<Record>),
+    RequestDetail {
+        record: Box<Record>,
+        failure: Option<FailureRecord>,
+    },
     GatewayBind(String),
     ThemePreferenceSaved(Result<ThemePreference, String>),
     OpenBrowser(Zeroizing<String>),
@@ -516,7 +519,10 @@ async fn run(
                         match store.request_record(&id).await {
                             Ok(Some(mut record))=>{
                                 if let Some(g)=&gateway && let Some(live)=g.live_records().into_iter().find(|r|r.id==id){record=live;}
-                                let _=sender.try_send(Event::RequestDetail(Box::new(record)));
+                                match store.failure_record(&id).await {
+                                    Ok(failure)=>{let _=sender.try_send(Event::RequestDetail{record:Box::new(record),failure});},
+                                    Err(_)=>{let _=sender.try_send(Event::Error("请求关联异常无法读取，请重试".into()));}
+                                }
                             },
                             _=>{let _=sender.try_send(Event::Error("请求记录不存在、已过期或无法读取".into()));}
                         }
