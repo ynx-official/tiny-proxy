@@ -1,7 +1,7 @@
 # 本地数据模型
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14  
 关联文档：[认证](authentication.md)、[安全](threat-model.md)、[业务规则](../01-requirements/business-rules.md)
 
 ## 存储选择
@@ -48,6 +48,8 @@ Token bundle 包含 access/refresh/retained ID Token、有效期、权限信息�
 - 记录写入：0006 起请求开始即建档，运行中每秒检查点，结束结果和异常一次事务提交；不逐 token 落库。写入失败告警并计数，不伪造完成；具体边界见 [请求诊断](../05-operations/request-diagnostics.md)。
 
 ## 迁移、备份、清理
+
+2026-10-14 针对 Windows 安装版与开发库的 LF/CRLF 校验冲突，迁移源文件和新增记录统一采用 LF；读取既有记录时额外认可同一 SQL 的精确 CRLF 校验值，仅调整内存迁移描述，不改写历史校验或重放已完成 SQL。内容差异、未知版本和未完成迁移仍按 SQLx 规则拒绝，证据与待运行回归见 [数据库启动兼容清单](../04-quality/database-startup-checklist.md)。
 
 P1 覆盖空库、旧版本升级、迁移失败回滚和不支持降级。迁移前使用 SQLite 一致性备份机制；不复制正在写入的 app.db 而遗漏 WAL。
 

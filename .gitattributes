@@ -1,0 +1,2 @@
+# SQLx hashes migration bytes. Windows and macOS must embed the same scripts.
+/migrations/*.sql text eol=lf

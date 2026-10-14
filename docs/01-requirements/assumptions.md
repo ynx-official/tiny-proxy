@@ -1,7 +1,7 @@
 # 已确认事实、假设与待确认决策
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14  
 关联文档：[PRD](prd.md)、[参考依据](../03-architecture/reference-analysis.md)、[实施计划](../06-delivery/development-plan.md)
 
 ## 用户已确认
@@ -42,7 +42,7 @@
 | D06 | MVP 文本 + function tools；Responses 子集；2026-10-13 用户批准追加用户 Base64 图片输入，规则见 [API 契约](../03-architecture/api-contracts.md#图片输入兼容规则)；结构化输出仍后置 | 图片追加范围已批准；其他未确认范围保持原状态 | 实施前 |
 | D07 | 默认本机 8787；手动启用指定 LAN/VPN 地址；LAN HTTP 有明文传输边界 | 待网络默认值确认 | 网络开放前 |
 | D08 | 不支持字段严格报错，Trae 不可配置字段若阻塞接入则单独评审兼容策略 | 待实测 | P0/P3 |
-| D09 | 关闭窗口入托盘、主动退出停服务；自启默认关 | 待桌面行为确认 | P5 前 |
+| D09 | Windows 关闭窗口默认入托盘、主动退出停服务；自启默认关 | 2026-10-14 用户确认 Windows 行为，见 [B13](business-rules.md)；macOS 托盘待实施 | Windows 源码已修改，运行待验 |
 | D10 | UI Style ID=hashicorp | 用户已选择并记录 | 已解决 |
 | D11 | [ASCII 原型](../02-design/ascii-prototype.md)中的布局、启动前条件、设置保存和操作反馈 | 按现有原型开始实现；未实现功能仍显式标注 | 分阶段验收 |
 

@@ -1,7 +1,7 @@
 # Tiny Proxy 方案与开发计划
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14  
 关联文档：[项目章程](00-project/project-charter.md)、[开发计划](06-delivery/development-plan.md)
 
 ## 阅读顺序
@@ -38,7 +38,7 @@
 | 安全 | [权限矩阵与威胁模型](03-architecture/threat-model.md) |
 | 参考依据 | [cursor-byok 分析与来源](03-architecture/reference-analysis.md) |
 | 决策记录 | [桌面技术栈](03-architecture/adr/0001-desktop-stack.md)、[Codex 路线](03-architecture/adr/0003-codex-device-gateway.md)、[本地账号状态与额度](03-architecture/adr/0004-local-account-state.md)、[历史认证候选](99-archive/adr-0002-siwc-candidate.md) |
-| 质量 | [验证计划](04-quality/verification-plan.md)、[请求记录测试清单](04-quality/request-records-checklist.md)、[主题验证清单](04-quality/theme-checklist.md) |
+| 质量 | [验证计划](04-quality/verification-plan.md)、[请求记录测试清单](04-quality/request-records-checklist.md)、[主题验证清单](04-quality/theme-checklist.md)、[Windows 启动与托盘清单](04-quality/desktop-lifecycle-checklist.md)、[数据库启动兼容清单](04-quality/database-startup-checklist.md) |
 | 使用与维护 | [桌面运行、接入和恢复](05-operations/desktop-operations.md)、[请求记录与长耗时诊断](05-operations/request-diagnostics.md) |
 | 归档 | [早期认证方案](99-archive/siwc-authentication.md)、[早期验证记录](99-archive/siwc-probe-implementation.md) |
 | 交付 | [分阶段开发计划](06-delivery/development-plan.md)、[开发验证记录](06-delivery/implementation-status.md) |
@@ -48,6 +48,8 @@
 2026-10-13 用户要求增加白天模式并默认跟随电脑；行为与配色见 [桌面视觉系统](02-design/visual-system.md#白天模式与跟随电脑)，对应 A-theme-01—A-theme-04。源码阶段未执行编译或测试；首版授权后的双平台自动测试与打包结果见 [v1.0.0 验证记录](upgrade/v1.0.0/README.md#验证结果)，桌面主题实机验收仍见 [主题清单](04-quality/theme-checklist.md)。
 
 ## 评审方式
+
+2026-10-14 用户确认 Windows EXE 启动无控制台、关闭默认收起托盘；权威规则为 [B13](01-requirements/business-rules.md)，操作说明见 [Windows 窗口与托盘](05-operations/desktop-operations.md#windows-窗口与托盘)。本次只修改源码与回归代码，未编译或打包，待测事项见 [清单](04-quality/desktop-lifecycle-checklist.md)。
 
 [决策表](01-requirements/assumptions.md)集中维护待确认事项，其他文档引用。确认技术栈不等于确认所有认证、隐私和产品默认值。后续修改需说明原因及受影响的验收场景。
 

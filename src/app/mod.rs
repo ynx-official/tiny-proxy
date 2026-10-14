@@ -364,11 +364,9 @@ async fn run(
     }
     let store = match Store::open(&database).await {
         Ok(s) => s,
-        Err(_) => {
+        Err(error) => {
             let _ = sender
-                .send(Event::Error(
-                    "本地数据库初始化失败，请检查数据目录权限".into(),
-                ))
+                .send(Event::Error(error.startup_message(&database)))
                 .await;
             return;
         }

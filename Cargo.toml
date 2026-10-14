@@ -8,7 +8,7 @@ description = "Personal native desktop model gateway"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:gpui-kit"]
+desktop = ["dep:gpui-kit", "dep:raw-window-handle"]
 
 [dependencies]
 anyhow = "1"
@@ -37,8 +37,9 @@ zeroize = { version = "1", features = ["derive"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = { version = "0.6", optional = true }
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 aes-gcm = { version = "0.10", features = ["zeroize"] }

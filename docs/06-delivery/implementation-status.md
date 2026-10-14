@@ -1,10 +1,18 @@
 # 开发验证记录
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14  
 关联文档：[路线决定](../03-architecture/adr/0003-codex-device-gateway.md)、[Trae 接入](../05-operations/trae-connection.md)、[开发计划](development-plan.md)
 
 ## 当前交付
+
+2026-10-14 安装版数据库初始化故障：只读完整性检查正常；本地 0001–0008 迁移记录为 LF 校验值，已安装 v1.0.0 EXE 内嵌 CRLF SQL 与校验值，确认存在换行差异导致的迁移校验冲突。源码已固定 LF、兼容精确 CRLF 历史值并细分启动错误；保留真实数据库、迁移记录与现有 EXE。已补回归代码，尚未执行编译型测试、构建或打包，不能声称安装版已实测修复；详见 [数据库启动兼容清单](../04-quality/database-startup-checklist.md)。
+
+2026-10-14 Windows 启动无控制台、关闭默认收起托盘及恢复/退出源码已修改。未重新编译、运行测试或打包，现有 EXE 不变，不能作为新行为的运行证据；待验场景集中在 [Windows 桌面生命周期清单](../04-quality/desktop-lifecycle-checklist.md)。
+
+本次补上 Windows GUI 子系统属性、原生托盘 owner/通知图标/菜单、关闭拦截、按数据目录唤起现有实例、设置退出与可见错误反馈。Win32 回调只发送事件，退出沿用 GPUI 结束后 `Backend::stop` 的收尾路径。`raw-window-handle` 复用锁文件已有版本，未升级依赖或版本号。
+
+本次非编译检查：修改的 Rust 文件使用本机 Rust 1.96.1 的 rustfmt 直接格式化并检查通过；项目固定 1.96.0 的 rustfmt 无法启动（退出码 `0xc0000135`），经 rustup 入口还会触发渠道同步，因此本次未安装/修复工具链。离线 `cargo metadata --locked --no-deps` 成功解析清单；完整离线依赖元数据受未缓存的 `accesskit_atspi_common v0.19.1` 阻挡，不能据此声明完整依赖验证。上述检查均不是编译或运行测试。
 
 当前采用参考项目的 Codex 设备码认证与专用模型上游，保留桌面技术栈及 hashicorp 风格。主程序为 target/debug/tiny-proxy.exe，窗口标题“Tiny Proxy · Codex 网关”。
 

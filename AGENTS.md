@@ -1,7 +1,7 @@
 # Tiny Proxy 项目约定
 
 状态：Review  
-最后更新：2026-10-13  
+最后更新：2026-10-14  
 关联文档：[文档索引](docs/README.md)、[实施计划](docs/06-delivery/development-plan.md)
 
 ## 已确认边界
@@ -13,6 +13,7 @@
 - 2026-10-13 用户明确批准采用参考项目的 Codex 设备码登录、模型目录和专用 Responses 上游。依据 docs/03-architecture/adr/0003-codex-device-gateway.md。
 - 2026-10-13 用户批准密钥可恢复、多账号、模型/测试/额度本地持久化及运行期间每小时只读额度查询，依据 docs/03-architecture/adr/0004-local-account-state.md。
 - 用户于 2026-10-13 明确要求“开始实行”，当前进入开发，按既有方案先执行 P0，并推进不依赖真实账号验证的基础模块。正式发布仍需单独确认。
+- 2026-10-14 用户要求 Windows EXE 启动不附带命令行窗口、右上角关闭默认收起到托盘；托盘或设置中的显式退出停止服务，托盘不可用保持窗口可操作。macOS 托盘不在本次修改范围，验收见 docs/04-quality/desktop-lifecycle-checklist.md。
 
 ## 工程原则
 

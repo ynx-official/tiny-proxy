@@ -72,7 +72,7 @@ cargo run --locked
 
 - 修改监听地址或切换账号前，先停止网关。
 - 端口占用或地址不可用时，应用显示错误，可修改地址后重试。
-- 手动停止只影响本次运行；关闭窗口停止网关并退出，下次打开仍自动监听。
+- 手动停止只影响本次运行；Windows 关闭窗口默认收起托盘并继续服务，托盘或设置中主动退出才停止网关。此改动目前仅在源码中，现有 EXE 需重新构建才生效，见 [待测清单](docs/04-quality/desktop-lifecycle-checklist.md)。
 - 应用不自动修改防火墙，不启用公网或通配监听。
 
 ## 🔌 客户端接入
@@ -165,7 +165,8 @@ OAuth Token 仅由本机用于固定 Codex 上游。外部客户端不能管理�
 | 已有真实验证 | Codex 账号登录、模型目录、一次完整文本调用 |
 | 尚待真实联调 | Codex 图片、完整工具往返、实际 Trae 版本、第二台设备 |
 | 最终代码待验证 | 请求元数据持久化、失败异常分页与详情界面；请求体上限取消；在线更新、双平台打包流水线与 macOS 凭据保护 |
-| 尚未实现 | 远端撤销、托盘、开机自启、其余完整设置 |
+| 源码已修改，尚未运行验证 | Windows 启动无控制台、关闭窗口入托盘、恢复及显式退出 |
+| 尚未实现 | 远端撤销、macOS 托盘、开机自启、其余完整设置 |
 
 完整实现范围和历史检查证据见 [开发验证记录](docs/06-delivery/implementation-status.md)。当前不宣称完整 OpenAI 兼容，也不将全部产品原型视为已实现页面。
 
@@ -208,4 +209,4 @@ cargo build --locked
 
 ---
 
-文档状态：Review · 最后更新：2026-10-13 · 排版参考：[radioactive-state](https://github.com/MananTank/radioactive-state)
+文档状态：Review · 最后更新：2026-10-14 · 排版参考：[radioactive-state](https://github.com/MananTank/radioactive-state)

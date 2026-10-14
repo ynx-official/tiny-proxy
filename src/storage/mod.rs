@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 mod desktop;
+mod migrations;
 pub mod recovery;
 mod requests;
 mod updates;
@@ -35,6 +36,61 @@ pub enum Error {
     Database(#[from] sqlx::Error),
     #[error("local database migration failed")]
     Migration(#[from] sqlx::migrate::MigrateError),
+}
+
+impl Error {
+    pub(crate) fn startup_message(&self, path: &Path) -> String {
+        use sqlx::migrate::MigrateError;
+        let reason = match self {
+            Self::Migration(MigrateError::VersionMismatch(version)) => {
+                format!("迁移 {version} 校验不一致，请使用兼容版本并核对迁移来源")
+            }
+            Self::Migration(MigrateError::VersionMissing(version)) => {
+                format!("当前程序不支持数据库中的迁移 {version}，请使用支持该数据库的版本")
+            }
+            Self::Migration(MigrateError::Dirty(version)) => {
+                format!("迁移 {version} 未完整完成，需要检查迁移记录或一致性备份")
+            }
+            Self::Database(error) | Self::Migration(MigrateError::Execute(error)) => {
+                database_startup_reason(error).into()
+            }
+            Self::Migration(MigrateError::ExecuteMigration(error, version)) => {
+                format!(
+                    "执行迁移 {version} 失败：{}",
+                    database_startup_reason(error)
+                )
+            }
+            Self::Migration(_) => "数据库迁移失败，请检查程序版本和迁移记录".into(),
+            _ => "本地存储初始化失败".into(),
+        };
+        format!(
+            "本地数据库初始化失败：{reason}。\n数据库：{}\n请保留原有数据库，勿删除后重试。",
+            path.display()
+        )
+    }
+}
+
+// Do not display raw SQL errors: they may contain saved values or SQL text.
+fn database_startup_reason(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::Database(error) => {
+            match error.code().and_then(|code| code.parse::<u32>().ok()) {
+                Some(code) => match code & 0xff {
+                    5 | 6 => "数据库正被占用，请退出其他使用同一数据目录的实例",
+                    8 => "数据库或数据目录为只读，请检查访问权限",
+                    11 | 26 => "数据库文件损坏或格式无效，请检查一致性备份",
+                    13 => "数据库所在磁盘空间不足",
+                    14 => "无法打开数据库文件，请检查数据目录路径与访问权限",
+                    _ => "SQLite 数据库操作失败，请检查数据库状态与程序版本",
+                },
+                None => "数据库操作失败，请检查数据库状态与程序版本",
+            }
+        }
+        sqlx::Error::Io(_) => "数据库文件访问失败，请检查数据目录与磁盘状态",
+        sqlx::Error::PoolTimedOut => "数据库连接超时，请检查占用情况与磁盘状态",
+        sqlx::Error::Configuration(_) => "数据库连接配置无效，请检查数据目录路径",
+        _ => "数据库操作失败，请检查数据库状态与程序版本",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +170,10 @@ impl Store {
             .max_connections(4)
             .connect_with(options)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if let Err(error) = migrations::run(&pool).await {
+            pool.close().await;
+            return Err(error.into());
+        }
         sqlx::query("INSERT OR IGNORE INTO app_settings (singleton_id, host_id) VALUES (1, ?)")
             .bind(format!("urn:uuid:{}", Uuid::new_v4()))
             .execute(&pool)

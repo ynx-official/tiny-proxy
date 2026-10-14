@@ -18,6 +18,13 @@ use tiny_proxy::{
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
+#[cfg(windows)]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(windows)]
+use std::rc::Rc;
+#[cfg(windows)]
+use tiny_proxy::platform::tray::{Tray, TrayEvent};
+
 const PAGES: [&str; 6] = ["概览", "账号连接", "模型", "客户端接入", "请求记录", "设置"];
 
 fn clear_removed_key_display(
@@ -198,6 +205,9 @@ fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec
 }
 
 struct Desktop {
+    #[cfg(windows)]
+    tray: Option<Rc<Tray>>,
+    tray_notice: Option<String>,
     update: tiny_proxy::updater::Snapshot,
     update_interval: Entity<InputState>,
     update_notice: Option<String>,
@@ -241,9 +251,50 @@ impl Desktop {
     fn new(
         commands: mpsc::Sender<Command>,
         events: mpsc::Receiver<Event>,
+        _data_directory: &std::path::Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        #[cfg(windows)]
+        let (tray, tray_notice) = {
+            let native_window = window.window_handle().ok().and_then(|handle| {
+                if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                    Some(handle.hwnd.get() as windows_sys::Win32::Foundation::HWND)
+                } else {
+                    None
+                }
+            });
+            let result = native_window
+                .ok_or_else(|| std::io::Error::other("无法读取 Windows 窗口句柄"))
+                .and_then(|hwnd| Tray::new(hwnd, _data_directory));
+            let (tray, notice) = match result {
+                Ok(tray) => (Some(Rc::new(tray)), None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "托盘初始化失败：{error}。窗口保持打开，可在设置中退出应用。"
+                    )),
+                ),
+            };
+            let close_tray = tray.clone();
+            window.on_window_should_close(cx, move |_, _| {
+                if let Some(tray) = &close_tray {
+                    if let Err(error) = tray.hide() {
+                        tiny_proxy::platform::tray::show_error(&error.to_string());
+                    }
+                } else {
+                    tiny_proxy::platform::tray::show_error(
+                        "托盘不可用，窗口保持打开。请在设置中选择“退出应用”。",
+                    );
+                }
+                // A titlebar close never stops the gateway or destroys the
+                // view. Explicit quit/update still uses GPUI's quit path.
+                false
+            });
+            (tray, notice)
+        };
+        #[cfg(not(windows))]
+        let tray_notice = None;
         let colors = theme::apply(ThemePreference::default(), window.appearance(), cx);
         cx.observe_window_appearance(window, |this, window, cx| {
             if this.theme_preference == ThemePreference::System {
@@ -269,6 +320,9 @@ impl Desktop {
         })
         .detach();
         Self {
+            #[cfg(windows)]
+            tray,
+            tray_notice,
             update: tiny_proxy::updater::Snapshot {
                 preferences: Default::default(),
                 status: Default::default(),
@@ -314,6 +368,25 @@ impl Desktop {
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut changed = false;
+        #[cfg(windows)]
+        if let Some(tray) = &self.tray {
+            while let Ok(event) = tray.try_recv() {
+                changed = true;
+                match event {
+                    TrayEvent::Restore => {}
+                    TrayEvent::Exit => {
+                        // main() calls Backend::stop after the GPUI loop ends;
+                        // this releases listening ports and drains records.
+                        cx.quit();
+                        return;
+                    }
+                    TrayEvent::Unavailable => {
+                        self.tray_notice =
+                            Some("托盘恢复失败，已重新显示窗口；可在设置中退出应用。".into());
+                    }
+                }
+            }
+        }
         while let Ok(event) = self.events.try_recv() {
             changed = true;
             match event {
@@ -1364,7 +1437,9 @@ impl Desktop {
             .child(appearance)
             .child(self.online_updates(cx))
             .child(self.panel("桌面与后台", "GPUI Kit 0.7.3 · Tokio · Axum 模型网关 · SQLite · 本机凭据保护 · Codex 设备码认证"))
-            .child(self.panel("窗口与网络", "打开应用时自动启动网关，沿用上次成功监听地址。需要已登录账号和有效客户端密钥；失败后可在客户端接入页重试。关闭窗口即停止网关并退出。托盘与开机自启尚未实现。"))
+            .child(self.panel("窗口与网络", if cfg!(windows) { "打开应用时自动启动网关，沿用上次成功监听地址。关闭窗口默认收起到托盘，网关继续运行；点击托盘图标或再次打开应用可恢复窗口。右键托盘选择退出，或点击下方“退出应用”，将停止网关并结束应用。开机自启尚未实现。" } else { "打开应用时自动启动网关，沿用上次成功监听地址。需要已登录账号和有效客户端密钥；失败后可在客户端接入页重试。关闭窗口即停止网关并退出。托盘与开机自启尚未实现。" }))
+            .when_some(self.tray_notice.as_ref(), |column, notice| column.child(div().text_color(rgb(self.colors.error)).child(notice.clone())))
+            .child(Button::new("quit-application").label("退出应用").on_click(|_, _, cx| cx.quit()))
             .child(self.panel("界面风格", "hashicorp · 白天与夜间配色、分层表面与明确状态。"))
             .child(self.panel("本地数据", if cfg!(target_os="macos") { "默认 ~/.tiny-proxy。账号 Token 与可查看密钥采用 AES-256-GCM，加密密钥保存在本机钥匙串。SQLite 保存模型、测试与额度，不是全库加密；只复制数据库不能迁移凭据。额度每小时查询，退出暂停。" } else { "默认 %USERPROFILE%/.tiny-proxy。首次启动复制旧目录历史数据并保留原库。账号 Token 与可查看密钥使用 DPAPI，模型、测试与额度保存在 SQLite，不是全库加密。额度每小时查询，退出暂停。" }))
             .into_any_element()
@@ -1474,7 +1549,11 @@ impl Render for Desktop {
     }
 }
 
-pub fn run(commands: mpsc::Sender<Command>, events: mpsc::Receiver<Event>) {
+pub fn run(
+    commands: mpsc::Sender<Command>,
+    events: mpsc::Receiver<Event>,
+    data_directory: std::path::PathBuf,
+) {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -1499,7 +1578,7 @@ pub fn run(commands: mpsc::Sender<Command>, events: mpsc::Receiver<Event>) {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Desktop::new(commands, events, window, cx))
+                cx.new(|cx| Desktop::new(commands, events, &data_directory, window, cx))
             })
             .expect("Tiny Proxy window could not be opened");
             cx.activate(true);

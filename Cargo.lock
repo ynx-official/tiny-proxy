@@ -7201,6 +7201,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.8",
  "rand 0.9.5",
+ "raw-window-handle",
  "reqwest",
  "rsa",
  "security-framework",
