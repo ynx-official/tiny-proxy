@@ -2,6 +2,7 @@
 pub mod app;
 pub mod auth;
 pub mod gateway;
+pub mod overview;
 pub mod platform;
 pub mod protocol;
 pub mod storage;

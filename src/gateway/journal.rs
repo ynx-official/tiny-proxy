@@ -236,6 +236,12 @@ impl Trace {
             r.output_tokens = result["usage"]["output_tokens"]
                 .as_i64()
                 .or_else(|| result["usage"]["completion_tokens"].as_i64());
+            // Responses and the converted Chat result use different detail keys.
+            // Missing cache metadata is unknown, even when the request succeeded.
+            r.cached_input_tokens = result["usage"]["input_tokens_details"]["cached_tokens"]
+                .as_i64()
+                .or_else(|| result["usage"]["prompt_tokens_details"]["cached_tokens"].as_i64())
+                .filter(|tokens| *tokens >= 0);
             r.phase = "finished".into();
         });
     }

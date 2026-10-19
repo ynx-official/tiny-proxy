@@ -5,7 +5,7 @@ fn status_text(status: &UpdateStatus) -> String {
     match status {
         UpdateStatus::NotChecked => "尚未检查更新".into(),
         UpdateStatus::Checking => "正在检查更新…".into(),
-        UpdateStatus::UpToDate(info) => format!("当前版本已是最新 · 最新正式版本 {}", info.version),
+        UpdateStatus::UpToDate(info) => format!("已是最新版本 {}", info.version),
         UpdateStatus::UpdateAvailable(info) => format!("发现新版本 {}", info.version),
         UpdateStatus::Downloading(_, done, total) => {
             if *total == 0 {
@@ -50,18 +50,18 @@ impl Desktop {
         let downloading = matches!(status, UpdateStatus::Downloading(..));
         let mut content = div().v_flex().gap_3().p_5().rounded_lg().bg(rgb(self.colors.surface)).border_1().border_color(rgb(self.colors.border))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("在线更新"))
-            .child(div().child(format!("Tiny Proxy {CURRENT_VERSION} · {}", tiny_proxy::updater::runtime_environment_label())))
+            .child(div().child(format!("当前版本 {CURRENT_VERSION}")))
             .child(div().text_color(rgb(self.colors.muted)).child(format!("最近成功检查：{}", if preferences.last_checked_at <= 0 { "尚未检查".into() } else { format_time(Some(preferences.last_checked_at)) })))
             .child(div().h_flex().flex_wrap().gap_2().children([
                 (CheckMode::Startup, "启动时检查"), (CheckMode::Interval, "定时检查"), (CheckMode::Disabled, "关闭自动检查")
-            ].into_iter().map(|(mode,label)| Button::new(SharedString::from(format!("update-mode-{mode:?}"))).label(label)
-                .disabled(matches!(status, UpdateStatus::Installing))
+            ].into_iter().map(|(mode,label)| button(SharedString::from(format!("update-mode-{mode:?}"))).label(label)
+                .disabled(self.pending.update || matches!(status, UpdateStatus::Installing))
                 .when(preferences.mode == mode, |button| button.primary())
                 .on_click(cx.listener(move |this,_,_,cx| { let mut preferences = this.update.preferences.clone(); preferences.mode = mode; this.send(Command::ConfigureUpdates(preferences),cx); })))))
             .when(preferences.mode == CheckMode::Interval, |column| column.child(div().h_flex().flex_wrap().items_center().gap_2()
                 .child(div().child("检查间隔（小时）"))
-                .child(Input::new(&self.update_interval).w(px(96.)).disabled(matches!(status, UpdateStatus::Installing)))
-                .child(Button::new("save-update-interval").label("保存间隔").disabled(matches!(status, UpdateStatus::Installing))
+                .child(input(&self.update_interval).w(px(96.)).disabled(self.pending.update || matches!(status, UpdateStatus::Installing)))
+                .child(button("save-update-interval").label("保存间隔").disabled(self.pending.update || matches!(status, UpdateStatus::Installing))
                     .on_click(cx.listener(|this,_,_,cx| {
                         let value = this.update_interval.read(cx).value();
                         match value.parse::<u32>() {
@@ -69,9 +69,9 @@ impl Desktop {
                             _ => { this.status="请输入 1–8760 之间的整数小时".into();this.error=true;cx.notify(); }
                         }
                     })))
-                .child(div().text_color(rgb(self.colors.muted)).child("1–8760 小时 · 应用关闭时暂停"))))
-            .child(Button::new("update-notifications").label(if preferences.notify { "新版本提醒：开启" } else { "新版本提醒：关闭" })
-                .disabled(matches!(status, UpdateStatus::Installing))
+                .child(div().text_color(rgb(self.colors.muted)).child("1–8760 小时"))))
+            .child(button("update-notifications").label(if preferences.notify { "新版本提醒：开启" } else { "新版本提醒：关闭" })
+                .disabled(self.pending.update || matches!(status, UpdateStatus::Installing))
                 .on_click(cx.listener(|this,_,_,cx|{let mut prefs=this.update.preferences.clone();prefs.notify = !prefs.notify;this.send(Command::ConfigureUpdates(prefs),cx);})))
             .child(div().text_color(rgb(if matches!(status, UpdateStatus::Error(_) | UpdateStatus::DownloadFailed(..)) { self.colors.error } else { self.colors.ink })).child(status_text(status)))
             .when(downloading, |column| {
@@ -79,17 +79,16 @@ impl Desktop {
                 column.child(div().w_full().h(px(6.)).rounded_md().bg(rgb(self.colors.border)).child(div().h_full().w(relative(fraction)).bg(rgb(self.colors.ink))))
             })
             .child(div().h_flex().flex_wrap().gap_2()
-                .child(Button::new("check-update").label("检查更新").disabled(status.busy() || ready).on_click(cx.listener(|this,_,_,cx|this.send(Command::CheckUpdate,cx))))
-                .when(status.available().is_some(), |row| row.child(Button::new("download-update").label(if matches!(status, UpdateStatus::DownloadFailed(..) | UpdateStatus::DownloadCancelled(_)) { "重新下载" } else { "下载更新" }).primary().on_click(cx.listener(|this,_,_,cx|this.send(Command::DownloadUpdate,cx)))))
-                .when(downloading, |row| row.child(Button::new("cancel-update").label("取消下载").on_click(cx.listener(|this,_,_,cx|this.send(Command::CancelUpdateDownload,cx)))))
-                .when(ready, |row| row.child(Button::new("restart-update").label("安装并重启").primary().on_click(cx.listener(|this,_,_,cx|{this.confirm_update=true;cx.notify();}))))
-                .child(Button::new("open-releases").label("GitHub 版本页").on_click(|_,_,cx|cx.open_url(RELEASES_URL))))
+                .child(button("check-update").label(if matches!(status, UpdateStatus::Checking) { "检查中…" } else { "检查更新" }).disabled(self.pending.update || status.busy() || ready).on_click(cx.listener(|this,_,_,cx|this.send(Command::CheckUpdate,cx))))
+                .when(matches!(status, UpdateStatus::UpdateAvailable(_) | UpdateStatus::DownloadFailed(..) | UpdateStatus::DownloadCancelled(_)), |row| row.child(self.action_button("download-update").label(if matches!(status, UpdateStatus::DownloadFailed(..) | UpdateStatus::DownloadCancelled(_)) { "重新下载" } else { "下载更新" }).disabled(self.pending.update).on_click(cx.listener(|this,_,_,cx|this.send(Command::DownloadUpdate,cx)))))
+                .when(downloading, |row| row.child(button("cancel-update").label("取消下载").disabled(self.pending.update).on_click(cx.listener(|this,_,_,cx|this.send(Command::CancelUpdateDownload,cx)))))
+                .when(ready && !self.confirm_update, |row| row.child(self.action_button("restart-update").label("安装并重启").disabled(self.pending.update).on_click(cx.listener(|this,_,_,cx|{this.confirm_update=true;cx.notify();}))))
+                .child(button("open-releases").label("GitHub 版本页").on_click(|_,_,cx|cx.open_url(RELEASES_URL))))
             .when(self.confirm_update && ready, |column| column.child(div().v_flex().gap_3().p_4().border_1().border_color(rgb(self.colors.warning))
                 .child(div().child("安装会停止网关并中断进行中的请求，然后退出并启动新版本。macOS 安装包可能请求系统管理员授权。"))
                 .child(div().h_flex().gap_2()
-                    .child(Button::new("confirm-install-update").label("确认安装并重启").primary().on_click(cx.listener(|this,_,_,cx|{this.confirm_update=false;this.send(Command::InstallUpdate,cx);})))
-                    .child(Button::new("dismiss-install-update").label("稍后安装").on_click(cx.listener(|this,_,_,cx|{this.confirm_update=false;cx.notify();}))))))
-            .child(div().text_color(rgb(self.colors.muted)).child("检查只读取最新正式版发布信息。下载与安装需手动点击，不会静默替换应用。"));
+                    .child(self.action_button("confirm-install-update").label("确认安装并重启").disabled(self.pending.update).on_click(cx.listener(|this,_,_,cx|{this.confirm_update=false;this.send(Command::InstallUpdate,cx);})))
+                    .child(button("dismiss-install-update").label("稍后安装").on_click(cx.listener(|this,_,_,cx|{this.confirm_update=false;cx.notify();}))))));
         if !status.notes().is_empty() {
             content = content.child(
                 div()

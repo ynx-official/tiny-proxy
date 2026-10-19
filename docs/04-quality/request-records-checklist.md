@@ -1,7 +1,7 @@
 # 请求记录测试清单
 
 状态：Review  
-最后更新：2026-10-14
+最后更新：2026-10-15
 
 关联文档：[诊断说明](../05-operations/request-diagnostics.md)、[验收](../01-requirements/acceptance/mvp.md)、[验证记录](../06-delivery/implementation-status.md)、[执行限制](../../AGENTS.md)
 
@@ -17,9 +17,14 @@
 
 ## 建议自动验证
 
+2026-10-15 为合并的流中断原因补充回归代码：11 类失败（EOF、截断帧、JSON、UTF-8、event/type 冲突、未知事件、completed 校验、工具事件、提前哨兵、单事件超限、网络读取错误）× Chat/Responses × JSON/SSE，共 44 组请求。断言具体安全原因在响应与异常记录中一致，保留失败 HTTP 语义，不发成功 `[DONE]`，未知事件名/正文/工具参数/传输错误和密钥不进入响应或数据库。测试代码未运行；现有成功终态、持久连接/分片尾部、工具完成和取消回归应一并执行，不能据此声称用户报告的断流已修复。
+
 2026-10-14 用户随后明确要求默认信任字段。旧严格拒绝用例已按新契约改成接收/传递断言，保留鉴权、图片入口、必需转换结构和终态检查。新增 `gateway_trusted_inputs` 覆盖顶层/嵌套扩展、任意长度/采样、布尔兼容、推理目录枚举不阻断、原生历史不重新校验、130 个同名工具、原始/对象参数、缓存 JSON 与 HeaderValue 分界；HTTP 两接口 × JSON/SSE、上游 400 阶段、安全日志和完整终态。已有请求详情及跨页读取回归继续保留。按项目约定未运行编译型验证，不能用旧测试通过记录证明新契约通过。
 
 ```powershell
+# 本次流中断诊断回归；仅本地模拟上游，未执行
+cargo test --locked --no-default-features --test gateway_lifecycle stream_failure_diagnostics_identify_the_branch_without_saving_upstream_payloads
+
 # 默认信任下游字段及真实上游拒绝；只访问模拟服务，不消耗真实账号额度
 cargo test --locked --no-default-features --test gateway_trusted_inputs --test gateway_compatibility --test gateway_reasoning --test gateway_http --test gateway_images
 

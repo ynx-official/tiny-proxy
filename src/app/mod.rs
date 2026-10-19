@@ -27,14 +27,24 @@ pub enum Command {
     TestModel(String),
     CreateKey(String),
     RevokeKey(String),
-    RevealKey { id: String, copy: bool },
+    RevealKey {
+        id: String,
+        copy: bool,
+    },
     SelectAccount(String),
     RefreshUsage(String),
     StartGateway(String),
     StopGateway,
-    HistoryPage { requests: i64, failures: i64 },
+    HistoryPage {
+        requests: i64,
+        failures: i64,
+    },
     RequestDetail(String),
     SetThemePreference(ThemePreference),
+    LoadOverview {
+        request_id: u64,
+        period: crate::overview::OverviewPeriod,
+    },
 }
 pub struct HistorySnapshot {
     pub requests: Vec<Record>,
@@ -46,6 +56,11 @@ pub struct HistorySnapshot {
     pub write_failures: u64,
 }
 pub enum Event {
+    Overview {
+        request_id: u64,
+        period: crate::overview::OverviewPeriod,
+        result: Result<Box<crate::overview::OverviewSnapshot>, String>,
+    },
     Update(Box<crate::updater::Snapshot>),
     UpdateProgress(u64, u64),
     UpdateNotice(String),
@@ -261,7 +276,16 @@ async fn start_gateway(
     let address = validate_bind(value)?;
     let mut gateway = Gateway::start(address, store.clone(), service.clone())
         .await
-        .map_err(|e| format!("无法监听 {address}：{e}"))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!(
+                    "无法监听 {address}：端口 {} 已被占用。请在「客户端接入 → 连接地址」修改端口后重试",
+                    address.port()
+                )
+            } else {
+                format!("无法监听 {address}：{e}")
+            }
+        })?;
     // Only a successful bind replaces the address used on the next launch.
     if store.save_gateway_bind(address).await.is_err() {
         gateway.stop().await;
@@ -487,6 +511,14 @@ async fn run(
                 let Some(command)=command else {break};
                 if updates.installing() { continue; }
                 match command {
+                    Command::LoadOverview { request_id, period } => {
+                        let live = gateway.as_ref().map(|gateway| gateway.live_records()).unwrap_or_default();
+                        let result = match crate::overview::OverviewWindow::at(period, chrono::Local::now()) {
+                            Some(window) => store.overview(window, &live).await.map(Box::new).map_err(|_| "无法读取本地统计，请重试".to_owned()),
+                            None => Err("无法确定本机统计时间范围".to_owned()),
+                        };
+                        let _ = sender.send(Event::Overview { request_id, period, result }).await;
+                    },
                     Command::CheckUpdate=>updates.check(),
                     Command::DownloadUpdate=>updates.download(),
                     Command::CancelUpdateDownload=>updates.cancel_download(),
@@ -556,12 +588,16 @@ async fn run(
                     },
                     Command::Cancel=>operation.cancel(),
                     Command::StopGateway=>{
-                        if let Some(mut g)=gateway.take(){g.stop().await;let _=sender.send(Event::Gateway{address:None}).await;}
+                        if let Some(mut g)=gateway.take(){g.stop().await;}
+                        let _=sender.send(Event::Gateway{address:None}).await;
                         history(&store,None,&sender,request_page,failure_page).await;
                         let _=sender.send(Event::Status{message:"网关已停止，监听及在途请求已关闭".into(),busy:!jobs.is_empty()}).await;
                     },
                     Command::StartGateway(value)=>{
-                        if gateway.is_some(){continue;}
+                        if let Some(gateway) = &gateway {
+                            announce_gateway(gateway, &sender, !jobs.is_empty()).await;
+                            continue;
+                        }
                         match start_gateway(&value,&store,&service).await {
                             Ok(g)=>{announce_gateway(&g,&sender,!jobs.is_empty()).await;gateway=Some(g);},
                             Err(e)=>{let _=sender.send(Event::Error(e)).await;}

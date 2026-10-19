@@ -18,6 +18,12 @@ pub struct Palette {
     pub primary_hover: u32,
     pub primary_active: u32,
     pub accent: u32,
+    pub sidebar: u32,
+    pub selected: u32,
+    pub soft_border: u32,
+    pub primary: u32,
+    pub on_primary: u32,
+    pub progress: u32,
 }
 
 impl Palette {
@@ -38,24 +44,36 @@ impl Palette {
                 primary_hover: 0xe5e7eb,
                 primary_active: 0xb2b6bd,
                 accent: 0x2b89ff,
+                sidebar: 0x15181e,
+                selected: 0x1c334c,
+                soft_border: 0x252830,
+                primary: 0xffffff,
+                on_primary: 0x000000,
+                progress: 0x00ca8e,
             },
             // Preserve the layout and hierarchy of hashicorp while adapting
             // its dark-only reference to the user's requested daytime mode.
             ThemeMode::Light => Self {
-                canvas: 0xf7f8fa,
+                canvas: 0xf5f5f5,
                 surface: 0xffffff,
-                border: 0xcdd2da,
+                border: 0xd1d3d6,
                 ink: 0x15181e,
-                muted: 0x525b69,
+                muted: 0x62676e,
                 warning: 0x916000,
                 success: 0x006e4f,
                 error: 0xc22b36,
-                button: 0xeff1f5,
-                button_hover: 0xe2e6ed,
-                button_active: 0xcdd2da,
-                primary_hover: 0x303640,
-                primary_active: 0x000000,
+                button: 0xffffff,
+                button_hover: 0xf0f0f0,
+                button_active: 0xe2e2e2,
+                primary_hover: 0x353535,
+                primary_active: 0x111111,
                 accent: 0x1766cf,
+                sidebar: 0xffffff,
+                selected: 0xf0f0f0,
+                soft_border: 0xe1e3e6,
+                primary: 0x242424,
+                on_primary: 0xffffff,
+                progress: 0x35c65a,
             },
         }
     }
@@ -82,7 +100,9 @@ pub fn apply(preference: ThemePreference, appearance: WindowAppearance, cx: &mut
             "Microsoft YaHei UI"
         }
         .into();
-        theme.font_size = px(14.);
+        // Root uses this as the rem baseline for controls, icons and spacing.
+        // A 14px baseline plus text_sm had reduced body text to 12.25px.
+        theme.font_size = px(super::layout::REM_SIZE);
         theme.radius = px(8.);
         theme.shadow = false;
         theme.background = rgb(colors.canvas).into();
@@ -93,8 +113,8 @@ pub fn apply(preference: ThemePreference, appearance: WindowAppearance, cx: &mut
         theme.input = rgb(colors.border).into();
         theme.popover = rgb(colors.surface).into();
         theme.popover_foreground = rgb(colors.ink).into();
-        theme.primary = rgb(colors.ink).into();
-        theme.primary_foreground = rgb(colors.canvas).into();
+        theme.primary = rgb(colors.primary).into();
+        theme.primary_foreground = rgb(colors.on_primary).into();
         theme.primary_hover = rgb(colors.primary_hover).into();
         theme.primary_active = rgb(colors.primary_active).into();
         theme.button_primary = theme.primary;
@@ -158,6 +178,22 @@ mod tests {
     }
 
     #[test]
+    fn daytime_action_and_selection_colors_are_neutral_in_every_interaction_state() {
+        let colors = Palette::for_mode(ThemeMode::Light);
+        for color in [
+            colors.button,
+            colors.button_hover,
+            colors.button_active,
+            colors.primary,
+            colors.primary_hover,
+            colors.primary_active,
+        ] {
+            assert_eq!((color >> 16) & 0xff, (color >> 8) & 0xff);
+            assert_eq!((color >> 8) & 0xff, color & 0xff);
+        }
+    }
+
+    #[test]
     fn both_palettes_keep_text_and_status_readable_on_page_and_panels() {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             let colors = Palette::for_mode(mode);
@@ -178,9 +214,11 @@ mod tests {
             for background in [colors.button, colors.button_hover, colors.button_active] {
                 assert!(contrast(colors.ink, background) >= 4.5);
             }
-            for background in [colors.ink, colors.primary_hover, colors.primary_active] {
-                assert!(contrast(colors.canvas, background) >= 4.5);
+            for background in [colors.primary, colors.primary_hover, colors.primary_active] {
+                assert!(contrast(colors.on_primary, background) >= 4.5);
             }
+            assert!(contrast(colors.ink, colors.selected) >= 4.5);
+            assert!(contrast(colors.muted, colors.sidebar) >= 4.5);
             assert!(contrast(colors.accent, colors.canvas) >= 4.5);
         }
     }

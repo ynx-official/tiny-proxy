@@ -71,7 +71,10 @@ jobs:
           echo "::add-mask::$TEST_DATA_KEY"
           security add-generic-password -A -s dev.tiny-proxy.credentials -a local-aes-256-gcm-v1 -w "$TEST_DATA_KEY" "$TEST_KEYCHAIN"
       - run: cargo +1.96.0 fmt --all -- --check
+      - run: cargo +1.96.0 clippy --lib --bin tiny-proxy --locked -- -D warnings
+        if: steps.metadata.outputs.skip_tests == 'true'
       - run: cargo +1.96.0 clippy --all-targets --locked -- -D warnings
+        if: steps.metadata.outputs.skip_tests != 'true'
       - run: cargo +1.96.0 test --all-targets --locked
         if: steps.metadata.outputs.skip_tests != 'true'
         timeout-minutes: 15

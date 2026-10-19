@@ -223,6 +223,74 @@ async fn occupied_startup_address_reports_an_error_and_allows_manual_retry() {
 }
 
 #[tokio::test]
+async fn changing_an_occupied_port_starts_and_restores_the_new_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.db");
+    seed_ready(&path).await;
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let original = occupied.local_addr().unwrap();
+    let store = Store::open(&path).await.unwrap();
+    store
+        .save_update_preferences(&tiny_proxy::updater::Preferences {
+            mode: tiny_proxy::updater::CheckMode::Disabled,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store.save_gateway_bind(original).await.unwrap();
+    let mut backend = Backend::start(path.clone()).unwrap();
+    let mut events = backend.events.take().unwrap();
+    expect_error(
+        &mut events,
+        &format!("无法监听 {original}：端口 {} 已被占用", original.port()),
+    )
+    .await;
+    assert_eq!(store.gateway_bind().await.unwrap(), original.to_string());
+
+    let reservation = TcpListener::bind((original.ip(), 0)).unwrap();
+    let replacement = reservation.local_addr().unwrap();
+    assert_ne!(replacement.port(), original.port());
+    drop(reservation);
+    backend
+        .commands
+        .send(Command::StartGateway(replacement.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(running_address(&mut events).await, replacement.to_string());
+    assert_eq!(store.gateway_bind().await.unwrap(), replacement.to_string());
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("http://{replacement}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    backend.stop();
+
+    // Keep the original port occupied across restart: recovery must use only
+    // the successfully saved replacement, including the UI configuration.
+    let mut backend = Backend::start(path).unwrap();
+    let mut events = backend.events.take().unwrap();
+    loop {
+        match next(&mut events).await {
+            Event::GatewayBind(address) => {
+                assert_eq!(address, replacement.to_string());
+                break;
+            }
+            Event::Error(error) => panic!("{error}"),
+            _ => {}
+        }
+    }
+    assert_eq!(running_address(&mut events).await, replacement.to_string());
+    backend.stop();
+    assert!(TcpListener::bind(replacement).is_ok());
+    drop(occupied);
+    store.close().await;
+}
+
+#[tokio::test]
 async fn manually_stopping_an_automatic_listener_keeps_it_stopped_until_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("app.db");
@@ -265,6 +333,60 @@ async fn manually_stopping_an_automatic_listener_keeps_it_stopped_until_restart(
     let mut backend = Backend::start(path).unwrap();
     let mut events = backend.events.take().unwrap();
     assert_eq!(running_address(&mut events).await, address.to_string());
+    backend.stop();
+    store.close().await;
+}
+
+#[tokio::test]
+async fn service_can_stop_twice_then_start_again_without_restarting_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.db");
+    seed_ready(&path).await;
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reservation.local_addr().unwrap();
+    let store = Store::open(&path).await.unwrap();
+    store
+        .save_update_preferences(&tiny_proxy::updater::Preferences {
+            mode: tiny_proxy::updater::CheckMode::Disabled,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store.save_gateway_bind(address).await.unwrap();
+    drop(reservation);
+    let mut backend = Backend::start(path).unwrap();
+    let mut events = backend.events.take().unwrap();
+    assert_eq!(running_address(&mut events).await, address.to_string());
+    settle(&mut events).await;
+    // A click based on a stale window state must still receive an acknowledgement.
+    backend
+        .commands
+        .send(Command::StartGateway(address.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(running_address(&mut events).await, address.to_string());
+    settle(&mut events).await;
+    for _ in 0..2 {
+        backend.commands.send(Command::StopGateway).await.unwrap();
+        loop {
+            match next(&mut events).await {
+                Event::Gateway { address: None } => break,
+                Event::Status { busy: false, .. } => {
+                    panic!("stop completed without acknowledging listener state")
+                }
+                Event::Error(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        settle(&mut events).await;
+    }
+    backend
+        .commands
+        .send(Command::StartGateway(address.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(running_address(&mut events).await, address.to_string());
+    assert_eq!(store.gateway_bind().await.unwrap(), address.to_string());
     backend.stop();
     store.close().await;
 }

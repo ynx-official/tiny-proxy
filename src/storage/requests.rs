@@ -26,6 +26,7 @@ pub struct RequestRecord {
     pub last_activity_at: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub cached_input_tokens: Option<i64>,
 }
 impl RequestRecord {
     pub fn new(id: String, method: String, route: String, started_at: i64) -> Self {
@@ -52,6 +53,7 @@ impl RequestRecord {
             last_activity_at: None,
             input_tokens: None,
             output_tokens: None,
+            cached_input_tokens: None,
         }
     }
 }
@@ -104,6 +106,8 @@ fn update(r: &RequestRecord) -> QueryBuilder<'_, Sqlite> {
         .push_bind(r.input_tokens)
         .push(",output_tokens=")
         .push_bind(r.output_tokens)
+        .push(",cached_input_tokens=")
+        .push_bind(r.cached_input_tokens)
         .push(" WHERE id=")
         .push_bind(&r.id)
         .push(" AND ended_at IS NULL");

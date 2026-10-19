@@ -39,7 +39,7 @@ try {
     try {
         Copy-Item -LiteralPath $sourceExe -Destination (Join-Path $portableDir "tiny-proxy.exe")
         Compress-Archive -LiteralPath $portableDir -DestinationPath $portableArchive -CompressionLevel Optimal
-        $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+        $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") |
             Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
         if (-not $iscc) { throw "Inno Setup 6 is required" }
         & $iscc "/DMyAppVersion=$packageVersion" "/DSourceExe=$sourceExe" "/DSetupIcon=$root\assets\icons\tiny-proxy.ico" "/DOutputDir=$OutputDir" "/DOutputBaseFilename=$installerBase" (Join-Path $PSScriptRoot "windows\tiny-proxy.iss")

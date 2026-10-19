@@ -98,3 +98,11 @@ codex_session 是单行活动 Codex 会话：singleton_id=1、encrypted_blob、g
 ## 0007 在线更新偏好
 
 用户于 2026-10-13 批准移植 ashell 更新设置。迁移 0007 新增单行 update_preferences：check_mode（startup/interval/disabled）、interval_hours（1–8760，默认24）、notify（默认1）、last_checked_at（默认0，仅成功检查后更新）。不存安装包、凭据或远端管理接口。迁移与持久化回归代码已加入，未执行。macOS 凭据密文封装及钥匙串边界见 [ADR 0005](adr/0005-online-update-release.md)。
+
+## 0009 缓存输入 Token 元数据
+
+2026-10-14 用户批准[缓存命中率预览](../02-design/overview-statistics.md)并要求使用真实数据，因此新增 `0009_request_cache_tokens.sql`，为 `request_records` 添加可空整数 `cached_input_tokens`。旧迁移与校验值不变，旧行保持 NULL，无默认0，不从已保存的成功状态或总输入量推算缓存。
+
+新请求只保存上游终态提供的非负整数缓存数，兼容 Responses 与转换后 Chat 的明细字段；检查点、结束事务、在途快照和按 ID 查询沿用同一记录类型。负值/缺失/非整数不填零，缓存超过输入的记录不参与缓存比例。该字段是输入用量的子集，不能重复加入总 Token。详情与复制保留已有元数据边界，不新增正文或凭据字段，不改变保留周期。
+
+0009 是追加迁移，当前旧版缺少该迁移的代码不能直接打开升级后的数据库；不删除迁移记录或回退列来绕过校验。内存 SQLite 已检查新建与0008→0009的原值保留，SQLx 升级/重开与历史校验值回归代码未运行；真实数据文件本轮未打开或升级。

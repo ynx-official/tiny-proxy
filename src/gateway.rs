@@ -2,7 +2,7 @@ use crate::{
     auth::codex::{self, Service},
     protocol::{
         gateway::{self, Projection},
-        sse::Decoder,
+        sse::{self, Decoder},
     },
     storage::{KeyStatus, Store},
 };
@@ -185,13 +185,17 @@ impl ApiError {
         }
         value
     }
-}
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
+    fn failure_info(&self) -> FailureInfo {
         let mut info = FailureInfo::new(self.code, self.status.as_u16());
         if let Some(message) = &self.diagnostic {
             info.message = message.clone();
         }
+        info
+    }
+}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let info = self.failure_info();
         let mut response = (self.status, Json(self.value())).into_response();
         response.extensions_mut().insert(info);
         response
@@ -212,12 +216,50 @@ impl From<codex::Error> for ApiError {
         Self::new(status, code, e.to_string())
     }
 }
-fn interrupted() -> ApiError {
-    ApiError::new(
-        502,
-        "upstream_stream_interrupted",
-        "Upstream did not produce a valid complete stream",
-    )
+fn interrupted(reason: &'static str) -> ApiError {
+    // Persist only locally defined reasons, never a transport error, event name,
+    // JSON parser excerpt, model output, or tool arguments supplied upstream.
+    let mut error = ApiError::new(502, "upstream_stream_interrupted", reason);
+    error.diagnostic = Some(reason.into());
+    error
+}
+fn sse_interrupted(error: sse::Error) -> ApiError {
+    interrupted(match error {
+        sse::Error::TooLarge => "SSE 单事件超过 1 MiB 限制",
+        sse::Error::InvalidUtf8 => "SSE 事件包含无效 UTF-8",
+        sse::Error::Truncated => "连接在 SSE 事件尚未完整接收时结束",
+    })
+}
+fn event_interrupted(value: &Value) -> ApiError {
+    interrupted(match value["type"].as_str() {
+        Some("response.completed") => "response.completed 终态未通过完整性校验",
+        Some("response.incomplete") => "response.incomplete 终态未通过完整性校验或结束原因不受支持",
+        Some(
+            "response.function_call_arguments.delta" | "response.function_call_arguments.done",
+        ) => "函数工具调用事件未通过完整性校验",
+        Some("response.output_item.added" | "response.output_item.done") => {
+            "输出条目事件未通过完整性校验或条目类型不受支持"
+        }
+        Some(
+            "response.created"
+            | "response.in_progress"
+            | "response.queued"
+            | "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.output_text.done"
+            | "response.refusal.done"
+            | "response.content_part.added"
+            | "response.content_part.done"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_text.done"
+            | "response.output_text.annotation.added",
+        ) => "上游事件未通过响应身份、顺序、字段或大小校验",
+        _ => "收到未支持或缺失类型的上游事件",
+    })
 }
 fn cancelled() -> ApiError {
     ApiError::new(
@@ -615,9 +657,7 @@ async fn generate_response(
                 trace.finish(None).await;
             }
             Err(e) => {
-                trace
-                    .finish(Some(FailureInfo::new(e.code, e.status.as_u16())))
-                    .await;
+                trace.finish(Some(e.failure_info())).await;
                 let data = if chat {
                     e.value()
                 } else {
@@ -699,7 +739,7 @@ async fn consume(
                     "Upstream request deadline exceeded",
                 )
             } else {
-                interrupted()
+                interrupted("读取上游响应时发生网络或传输错误")
             }
         })?;
         if let Some(trace) = trace {
@@ -713,20 +753,24 @@ async fn consume(
                 "Response exceeded the 16 MiB budget",
             ));
         }
-        for event in decoder.push(&chunk).map_err(|_| interrupted())? {
+        for event in decoder.push(&chunk).map_err(sse_interrupted)? {
             if event.data == "[DONE]" {
-                if seen_done || projection.terminal().is_none() {
-                    return Err(interrupted());
+                if seen_done {
+                    return Err(interrupted("上游重复发送 [DONE]"));
+                }
+                if projection.terminal().is_none() {
+                    return Err(interrupted("在有效终态之前收到 [DONE]"));
                 }
                 seen_done = true;
                 continue;
             }
             if seen_done {
-                return Err(interrupted());
+                return Err(interrupted("上游在 [DONE] 之后继续发送事件"));
             }
-            let value: Value = serde_json::from_str(&event.data).map_err(|_| interrupted())?;
+            let value: Value = serde_json::from_str(&event.data)
+                .map_err(|_| interrupted("SSE data 不是有效 JSON"))?;
             if event.event != "message" && Some(event.event.as_str()) != value["type"].as_str() {
-                return Err(interrupted());
+                return Err(interrupted("SSE event 名称与 JSON type 不一致"));
             }
             if matches!(value["type"].as_str(), Some("error" | "response.failed")) {
                 return Err(ApiError::new(
@@ -735,7 +779,13 @@ async fn consume(
                     "Upstream returned a failed response",
                 ));
             }
-            let chunks = projection.accept(&value).map_err(|_| interrupted())?;
+            let chunks = projection.accept(&value).map_err(|_| {
+                if projection.terminal().is_some() {
+                    interrupted("上游在有效终态之后继续发送事件")
+                } else {
+                    event_interrupted(&value)
+                }
+            })?;
             if let Some(trace) = trace {
                 let kind = value["type"].as_str().unwrap_or("");
                 let output = matches!(
@@ -778,12 +828,20 @@ async fn consume(
     // The optional trailing [DONE] can be split across network chunks. A validated
     // response terminal already ends the request; do not wait for that suffix.
     if projection.terminal().is_none() {
-        decoder.finish().map_err(|_| interrupted())?;
+        decoder.finish().map_err(sse_interrupted)?;
+        return Err(interrupted(
+            "连接已结束，但未收到有效的 response.completed/response.incomplete 终态",
+        ));
     }
     let result = if chat {
-        projection.finish().map_err(|_| interrupted())?
+        projection
+            .finish()
+            .map_err(|_| interrupted("上游终态无法转换为完整的 Chat 响应"))?
     } else {
-        projection.terminal().cloned().ok_or_else(interrupted)?
+        projection
+            .terminal()
+            .cloned()
+            .ok_or_else(|| interrupted("上游终态响应缺失"))?
     };
     if let Some(sender) = sender {
         for frame in terminal_frames {

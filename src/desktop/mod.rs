@@ -1,3 +1,18 @@
+mod accounts;
+mod branding;
+mod catalog;
+mod clients;
+mod components;
+mod interactions;
+mod layout;
+mod navigation;
+mod overview;
+mod overview_chart;
+mod overview_format;
+mod overview_state;
+mod presentation;
+mod requests;
+mod shell;
 mod theme;
 mod updates;
 
@@ -25,7 +40,16 @@ use std::rc::Rc;
 #[cfg(windows)]
 use tiny_proxy::platform::tray::{Tray, TrayEvent};
 
-const PAGES: [&str; 6] = ["概览", "账号连接", "模型", "客户端接入", "请求记录", "设置"];
+const PAGES: [&str; 6] = [
+    "概览",
+    "账号连接",
+    "模型",
+    "客户端接入",
+    "请求记录",
+    "系统设置",
+];
+
+use components::{button, input};
 
 fn clear_removed_key_display(
     keys: &[KeySummary],
@@ -58,7 +82,7 @@ fn format_time(value: Option<i64>) -> String {
         })
         .unwrap_or_else(|| "未提供".into())
 }
-fn test_status(value: &str) -> &str {
+fn test_status(value: &str) -> &'static str {
     match value {
         "completed" => "成功",
         "failed" => "失败",
@@ -117,6 +141,51 @@ fn request_duration(milliseconds: i64) -> String {
 // Rendering and clipboard export share these lines so copied diagnostics match
 // the visible snapshot, including unknown values and recovery-time semantics.
 fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec<String> {
+    let failure = failure.filter(|failure| failure.request_id == record.id);
+    let mut lines = vec![
+        request_status(&record.outcome).into(),
+        record.id.clone(),
+        format!("{} {}", record.method, record.route),
+        format!(
+            "模型：{}",
+            if record.model.is_empty() {
+                "未提供"
+            } else {
+                &record.model
+            }
+        ),
+    ];
+    if let Some(failure) = failure {
+        lines.push(presentation::failure_label(&failure.code).into());
+        lines.push(failure.code.clone());
+        lines.push(failure.message.clone());
+    }
+    lines.push("请求时间线".into());
+    for (label, time) in presentation::timeline(record) {
+        lines.push(format!("{label} · {}", request_time(Some(time))));
+    }
+    lines.push(format!(
+        "{} {}",
+        if record.outcome == "interrupted" {
+            "中断前已观察耗时"
+        } else {
+            "总耗时"
+        },
+        request_duration(record.elapsed_ms)
+    ));
+    for (label, value) in presentation::request_summary(record) {
+        lines.push(format!("{label}：{value}"));
+    }
+    if presentation::needs_stream_warning(record) {
+        lines.push("HTTP 200 不代表流已完整结束".into());
+    }
+    lines.push("完整诊断明细".into());
+    lines.extend(request_metadata_lines(record, failure));
+    lines.push("不保存提示词、回答、工具参数或认证信息。".into());
+    lines
+}
+
+fn request_metadata_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec<String> {
     let mut metadata = vec![
         format!(
             "{} {} · 模型 {} · {}",
@@ -193,6 +262,12 @@ fn request_detail_lines(record: &Record, failure: Option<&FailureRecord>) -> Vec
                 .output_tokens
                 .map_or("未提供".into(), |n| n.to_string())
         ),
+        format!(
+            "缓存输入 tokens：{}",
+            record
+                .cached_input_tokens
+                .map_or("未提供".into(), |n| n.to_string())
+        ),
         format!("密钥 ID：{}", record.key_id.as_deref().unwrap_or("未鉴权")),
         format!(
             "账号 ID：{}",
@@ -228,6 +303,20 @@ struct Desktop {
     update_notice: Option<String>,
     confirm_update: bool,
     page: usize,
+    client_tab: usize,
+    login_open: bool,
+    device_countdown: u64,
+    compact: bool,
+    selected_key: Option<String>,
+    selected_model: Option<String>,
+    account_details: Option<String>,
+    key_menu_open: bool,
+    model_menu_open: bool,
+    details_expanded: bool,
+    test_history_open: bool,
+    toast: Option<(String, Instant)>,
+    request_search: Entity<InputState>,
+    model_search: Entity<InputState>,
     theme_preference: ThemePreference,
     theme_loaded: bool,
     theme_saving: bool,
@@ -245,6 +334,8 @@ struct Desktop {
     models_checked_at: Option<i64>,
     device_code: Option<(Zeroizing<String>, Instant)>,
     gateway_address: Option<String>,
+    pending: interactions::Pending,
+    overview: overview_state::OverviewState,
     records: Vec<Record>,
     failures: Vec<FailureRecord>,
     request_count: i64,
@@ -256,7 +347,8 @@ struct Desktop {
     selected_failure: Option<FailureRecord>,
     requested_detail: Option<String>,
     log_write_failures: u64,
-    bind_address: Entity<InputState>,
+    bind_ip: Entity<InputState>,
+    bind_port: Entity<InputState>,
     models: Vec<Model>,
     key_name: Entity<InputState>,
     new_key: Option<(CreatedKey, Instant)>,
@@ -336,6 +428,18 @@ impl Desktop {
             }
         })
         .detach();
+        let request_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索本页请求 ID、模型或客户端"));
+        let model_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索模型 ID 或名称"));
+        cx.observe(&request_search, |_, _, cx| cx.notify()).detach();
+        cx.observe(&model_search, |_, _, cx| cx.notify()).detach();
+        let key_name = cx.new(|cx| InputState::new(window, cx).placeholder("例如：工作电脑 Trae"));
+        cx.observe(&key_name, |_, _, cx| cx.notify()).detach();
+        let bind_ip = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
+        let bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8787"));
+        cx.observe(&bind_ip, |_, _, cx| cx.notify()).detach();
+        cx.observe(&bind_port, |_, _, cx| cx.notify()).detach();
         Self {
             #[cfg(windows)]
             tray,
@@ -348,6 +452,20 @@ impl Desktop {
             update_notice: None,
             confirm_update: false,
             page: 0,
+            client_tab: 0,
+            login_open: false,
+            device_countdown: 0,
+            compact: false,
+            selected_key: None,
+            selected_model: None,
+            account_details: None,
+            key_menu_open: false,
+            model_menu_open: false,
+            details_expanded: false,
+            test_history_open: false,
+            toast: None,
+            request_search,
+            model_search,
             theme_preference: ThemePreference::default(),
             theme_loaded: false,
             theme_saving: false,
@@ -365,6 +483,8 @@ impl Desktop {
             models_checked_at: None,
             device_code: None,
             gateway_address: None,
+            pending: interactions::Pending::default(),
+            overview: overview_state::OverviewState::default(),
             records: vec![],
             failures: vec![],
             request_count: 0,
@@ -376,13 +496,22 @@ impl Desktop {
             selected_failure: None,
             requested_detail: None,
             log_write_failures: 0,
-            bind_address: cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1:8787")),
+            bind_ip,
+            bind_port,
             models: vec![],
-            key_name: cx.new(|cx| InputState::new(window, cx).placeholder("例如：工作电脑 Trae")),
+            key_name,
             new_key: None,
             revoke_id: None,
             test_result: None,
         }
+    }
+
+    fn set_bind_inputs(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (ip, port) = presentation::gateway_bind_fields(address);
+        self.bind_ip
+            .update(cx, |input, cx| input.set_value(ip, window, cx));
+        self.bind_port
+            .update(cx, |input, cx| input.set_value(port, window, cx));
     }
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -408,7 +537,17 @@ impl Desktop {
         }
         while let Ok(event) = self.events.try_recv() {
             changed = true;
+            let reveal_key = self.pending.reveal_requested;
+            self.pending.receive(&event);
             match event {
+                Event::Overview {
+                    request_id,
+                    period,
+                    result,
+                } => {
+                    self.overview
+                        .receive(request_id, period, result, Instant::now());
+                }
                 Event::Update(update) => {
                     if !update.preferences.notify {
                         self.update_notice = None;
@@ -466,6 +605,13 @@ impl Desktop {
                         self.test_result = None;
                     }
                     clear_removed_key_display(&keys, &mut self.new_key, &mut self.revoke_id);
+                    if self
+                        .selected_key
+                        .as_ref()
+                        .is_none_or(|id| !keys.iter().any(|key| &key.id == id))
+                    {
+                        self.selected_key = keys.first().map(|key| key.id.clone());
+                    }
                     self.keys = keys;
                     self.codex_connected = codex_connected;
                     self.accounts = accounts;
@@ -478,6 +624,7 @@ impl Desktop {
                     self.busy = busy;
                     self.error = false;
                     if !busy {
+                        self.login_open = false;
                         self.device_code = None;
                     }
                 }
@@ -486,11 +633,20 @@ impl Desktop {
                     self.busy = false;
                     self.error = true;
                     self.device_code = None;
+                    if self.selected_request.is_none() {
+                        self.requested_detail = None;
+                    }
                 }
                 Event::DeviceCode { code, expires_in } => {
-                    self.device_code = Some((code, Instant::now() + expires_in))
+                    // A late response must not reopen a cancelled login drawer.
+                    if self.login_open {
+                        self.device_code = Some((code, Instant::now() + expires_in));
+                    }
                 }
                 Event::Gateway { address } => {
+                    if let Some(address) = &address {
+                        self.set_bind_inputs(address, window, cx);
+                    }
                     self.gateway_address = address;
                 }
                 Event::History(history) => {
@@ -539,8 +695,7 @@ impl Desktop {
                     }
                 }
                 Event::GatewayBind(address) => {
-                    self.bind_address
-                        .update(cx, |input, cx| input.set_value(address, window, cx));
+                    self.set_bind_inputs(&address, window, cx);
                 }
                 Event::ThemePreferenceSaved(result) => {
                     self.theme_saving = false;
@@ -559,15 +714,21 @@ impl Desktop {
                 }
                 Event::OpenBrowser(url) => cx.open_url(&url),
                 Event::KeyCreated(key) => {
-                    self.new_key = Some((key, Instant::now()));
+                    self.selected_key = Some(key.id.clone());
+                    if reveal_key && self.page == 3 && self.client_tab == 1 {
+                        self.new_key = Some((key, Instant::now()));
+                    }
+                    self.toast = Some(("密钥已创建".into(), Instant::now()));
                     self.status = "密钥已加密保存，之后可随时查看或复制".into();
                     self.error = false;
                 }
                 Event::KeyRevealed { key, copy } => {
+                    self.selected_key = Some(key.id.clone());
                     if copy {
                         cx.write_to_clipboard(ClipboardItem::new_string(key.value.to_string()));
                         self.status = "密钥已复制到系统剪贴板".into();
-                    } else {
+                        self.toast = Some(("密钥已复制".into(), Instant::now()));
+                    } else if reveal_key && self.page == 3 && self.client_tab == 1 {
                         self.new_key = Some((key, Instant::now()));
                         self.status = "密钥已显示，两分钟后隐藏；可随时再次查看".into();
                     }
@@ -604,10 +765,40 @@ impl Desktop {
             .is_some_and(|(_, until)| Instant::now() >= *until)
         {
             self.device_code = None;
+            if self.login_open && self.busy {
+                self.send(Command::Cancel, cx);
+                self.status = "授权已过期，请重新申请".into();
+                self.error = true;
+            }
+            changed = true;
+        }
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= Duration::from_secs(4))
+        {
+            self.toast = None;
+            changed = true;
+        }
+        // Device-code countdown is presentation only; the backend owns expiry/cancellation.
+        let remaining = self
+            .device_code
+            .as_ref()
+            .map(|(_, until)| until.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or(0);
+        if remaining != self.device_countdown {
+            self.device_countdown = remaining;
             changed = true;
         }
         if changed {
             cx.notify();
+        }
+        if self.page == 0
+            && self.theme_loaded
+            && !self.pending.installing
+            && self.overview.should_refresh(Instant::now())
+        {
+            self.refresh_overview(None, cx);
         }
     }
 
@@ -633,976 +824,59 @@ impl Desktop {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        if !self.pending.allows(&command) {
+            return;
+        }
+        let after_enqueue = self.pending.after_enqueue(&command);
+        let overview_request = match &command {
+            Command::LoadOverview { request_id, period } => Some((*request_id, *period)),
+            _ => None,
+        };
+        let reveals_key = matches!(&command, Command::RevealKey { copy: false, .. });
+        let starts_busy = matches!(
+            &command,
+            Command::SignIn | Command::RefreshModels | Command::TestModel(_) | Command::Cancel
+        );
         let detail_id = match &command {
             Command::RequestDetail(id) => Some(id.clone()),
             _ => None,
         };
         if self.commands.try_send(command).is_err() {
+            if let Some((id, period)) = overview_request {
+                self.overview.receive(
+                    id,
+                    period,
+                    Err("后台忙碌或已经退出，请重试".into()),
+                    Instant::now(),
+                );
+                cx.notify();
+                return;
+            }
+            if starts_busy {
+                self.busy = false;
+            }
             self.status = "后台忙碌或已经退出，请稍后重试".into();
             self.error = true;
-        } else if let Some(id) = detail_id {
-            if self.selected_request.as_ref().is_some_and(|r| r.id != id) {
-                self.selected_request = None;
-                self.selected_failure = None;
+        } else {
+            self.pending = after_enqueue;
+            if overview_request.is_none() {
+                self.error = false;
             }
-            self.requested_detail = Some(id);
+            if reveals_key {
+                self.new_key = None;
+            }
+            if let Some(id) = detail_id {
+                if self.requested_detail.as_ref() != Some(&id) {
+                    self.details_expanded = false;
+                }
+                if self.selected_request.as_ref().is_some_and(|r| r.id != id) {
+                    self.selected_request = None;
+                    self.selected_failure = None;
+                }
+                self.requested_detail = Some(id);
+            }
         }
         cx.notify();
-    }
-
-    fn title(&self, subtitle: &'static str) -> Div {
-        div()
-            .v_flex()
-            .gap_2()
-            .mb_6()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(self.colors.muted))
-                    .child("TINY PROXY / PERSONAL GATEWAY"),
-            )
-            .child(
-                div()
-                    .text_2xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(PAGES[self.page]),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.colors.muted))
-                    .child(subtitle),
-            )
-    }
-
-    fn panel(&self, title: impl Into<SharedString>, content: impl Into<SharedString>) -> Div {
-        div()
-            .v_flex()
-            .gap_3()
-            .p_5()
-            .rounded_lg()
-            .bg(rgb(self.colors.surface))
-            .border_1()
-            .border_color(rgb(self.colors.border))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(title.into()))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.colors.muted))
-                    .child(content.into()),
-            )
-    }
-
-    fn overview(&self, cx: &mut Context<Self>) -> AnyElement {
-        div().v_flex().gap_4()
-            .child(self.title("Codex 设备码登录 · 为自己的 Agent 提供模型 API。"))
-            .child(self.panel("服务状态",self.gateway_address.as_ref().map(|a|format!("运行中 · http://{a}/v1")).unwrap_or_else(||"已停止 · 在客户端接入页启动监听".into())))
-            .child(self.panel("Codex 账号",if self.codex_connected {"已有 Codex 授权凭据；请求前自动检查有效期并续期。模型可用性以调用结果为准。"} else {"尚未连接账号。请前往账号连接，使用设备码完成授权。"}))
-            .child(div().h_flex().gap_3()
-                .child(Button::new("overview-login").primary().label("账号连接").on_click(cx.listener(|this,_,_,cx|{this.page=1;cx.notify();})))
-                .child(Button::new("overview-clients").label("配置 Trae 接入").on_click(cx.listener(|this,_,_,cx|{this.page=3;cx.notify();}))))
-            .child(self.panel("接入流程","首次使用：设备码授权 → 模型页测试 → 创建客户端密钥 → 选择 IP:端口并启动 → 配置 Trae。之后打开应用会自动启动网关。"))
-            .into_any_element()
-    }
-    fn accounts(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut view=div().v_flex().gap_4().child(self.title("使用与参考项目一致的 Codex 设备码授权，无需预装 Codex。"))
-            .child(div().h_flex().gap_3()
-                .child(Button::new("device-sign-in").primary().label(if self.codex_connected {"添加 / 更新账号授权"} else {"使用 Codex 设备码登录"})
-                    .disabled(self.busy || self.gateway_address.is_some()).on_click(cx.listener(|this,_,_,cx|{this.busy=true;this.send(Command::SignIn,cx);})))
-                .child(Button::new("cancel-login").label("取消等待").disabled(!self.busy).on_click(cx.listener(|this,_,_,cx|this.send(Command::Cancel,cx)))))
-            .child(self.panel("操作方式","获取设备码后，浏览器将打开 OpenAI 的 Codex 设备授权页。在该页面输入下面显示的代码，完成授权后应用会自动接收结果。"));
-        if let Some((code, _)) = &self.device_code {
-            view = view.child(
-                div()
-                    .v_flex()
-                    .gap_3()
-                    .p_5()
-                    .bg(rgb(self.colors.surface))
-                    .border_1()
-                    .border_color(rgb(self.colors.warning))
-                    .child("正在等待设备授权")
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_family("Consolas")
-                            .child(code.to_string()),
-                    )
-                    .child(
-                        div()
-                            .h_flex()
-                            .gap_3()
-                            .child(
-                                Button::new("copy-device-code")
-                                    .primary()
-                                    .label("复制设备码")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some((code, _)) = &this.device_code {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                code.to_string(),
-                                            ));
-                                        }
-                                    })),
-                            )
-                            .child(
-                                Button::new("open-device-page")
-                                    .label("打开授权页面")
-                                    .on_click(|_, _, cx| cx.open_url(VERIFICATION_URL)),
-                            ),
-                    ),
-            );
-        }
-        view=view.child(self.panel("本地账号与自动查询","账号逐条加密保存，重复授权更新原账号。应用运行时每小时查询额度，重新打开后补查到期账号；也可手动刷新。切换网关使用的账号前请先停止监听。"));
-        if self.accounts.is_empty() {
-            view = view.child(self.panel(
-                "尚无已保存账号",
-                "完成设备码授权后，账号与额度信息会显示在这里。",
-            ));
-        }
-        for account in &self.accounts {
-            let select_id = account.id.clone();
-            let usage_id = account.id.clone();
-            let checking = self.usage_busy.as_ref() == Some(&account.id);
-            let mut card = div()
-                .v_flex()
-                .gap_3()
-                .p_5()
-                .bg(rgb(self.colors.surface))
-                .border_1()
-                .border_color(rgb(self.colors.border))
-                .child(
-                    div()
-                        .h_flex()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(format!(
-                                    "{}{}",
-                                    account.display_name,
-                                    if account.active {
-                                        " · 当前使用"
-                                    } else {
-                                        ""
-                                    }
-                                )),
-                        )
-                        .child(
-                            div()
-                                .h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "select-{}",
-                                        account.id
-                                    )))
-                                    .label("使用此账号")
-                                    .disabled(
-                                        account.active
-                                            || self.busy
-                                            || self.gateway_address.is_some(),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.send(Command::SelectAccount(select_id.clone()), cx)
-                                    })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "usage-{}",
-                                        account.id
-                                    )))
-                                    .label(if checking {
-                                        "查询中…"
-                                    } else {
-                                        "刷新额度"
-                                    })
-                                    .disabled(checking)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.status = "额度查询已排队".into();
-                                        this.send(Command::RefreshUsage(usage_id.clone()), cx);
-                                    })),
-                                ),
-                        ),
-                );
-            if let Some(quota) = account
-                .usage_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Quota>(s).ok())
-            {
-                card = card.child(format!(
-                    "套餐：{} · 可用额度重置次数：{} · 次数更新：{}",
-                    quota.plan.as_deref().unwrap_or("未提供"),
-                    quota
-                        .reset_credits
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "未提供".into()),
-                    format_time(quota.reset_checked_at)
-                ));
-                for window in quota.windows {
-                    let period = match window.window_seconds {
-                        Some(18000) => "（5 小时）".to_owned(),
-                        Some(604800) => "（7 天）".to_owned(),
-                        Some(n) if n % 3600 == 0 => format!("（{} 小时）", n / 3600),
-                        Some(n) if n % 60 == 0 => format!("（{} 分钟）", n / 60),
-                        Some(n) => format!("（{n} 秒）"),
-                        None => String::new(),
-                    };
-                    card = card.child(format!(
-                        "{}{}  ·  剩余 {}  ·  下次重置 {}",
-                        window.name,
-                        period,
-                        window
-                            .remaining_percent
-                            .map(|n| format!("{n:.1}%"))
-                            .unwrap_or_else(|| "未提供".into()),
-                        format_time(window.reset_at)
-                    ));
-                }
-                if quota.limit_reached == Some(true) {
-                    card = card.child(
-                        div()
-                            .text_color(rgb(self.colors.warning))
-                            .child("上游提示当前额度已达限制"),
-                    );
-                }
-                if let Some(error) = quota.reset_error {
-                    card = card.child(div().text_color(rgb(self.colors.warning)).child(error));
-                }
-            } else {
-                card = card.child("尚无额度快照，等待查询或点击刷新额度。");
-            }
-            card = card.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.colors.muted))
-                    .child(format!(
-                        "上次成功：{}\n最近查询：{}  ·  下次自动查询：{}",
-                        format_time(account.usage_checked_at),
-                        format_time(account.usage_attempted_at),
-                        account
-                            .usage_attempted_at
-                            .map(|at| format_time(Some(at + 3600)))
-                            .unwrap_or_else(|| "即将查询".into())
-                    )),
-            );
-            if let Some(error) = &account.usage_error {
-                card = card.child(
-                    div()
-                        .text_color(rgb(self.colors.warning))
-                        .child(format!("{error} · 保留上次成功快照")),
-                );
-            }
-            view = view.child(card);
-        }
-        view.into_any_element()
-    }
-    fn network_controls(&self, cx: &mut Context<Self>) -> Div {
-        let mut view = div()
-            .v_flex()
-            .gap_3()
-            .p_5()
-            .bg(rgb(self.colors.surface))
-            .border_1()
-            .border_color(rgb(self.colors.border))
-            .child("模型网关监听")
-            .child("打开应用时自动恢复上次监听地址，默认 127.0.0.1:8787。修改地址请先停止网关；其他设备使用本机局域网或 VPN 地址。")
-            .child(
-                div()
-                    .h_flex()
-                    .gap_3()
-                    .child(
-                        Input::new(&self.bind_address)
-                            .w(px(280.))
-                            .disabled(self.gateway_address.is_some() || self.busy),
-                    )
-                    .child(
-                        Button::new("start-gateway")
-                            .primary()
-                            .label("启动网关")
-                            .disabled(
-                                self.busy
-                                    || self.gateway_address.is_some()
-                                    || !self.codex_connected
-                                    || self.keys.is_empty(),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let value = this.bind_address.read(cx).value().to_string();
-                                this.send(
-                                    Command::StartGateway(if value.trim().is_empty() {
-                                        "127.0.0.1:8787".into()
-                                    } else {
-                                        value.trim().into()
-                                    }),
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        Button::new("stop-gateway")
-                            .label("停止网关")
-                            .disabled(self.gateway_address.is_none())
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.send(Command::StopGateway, cx)),
-                            ),
-                    ),
-            )
-            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
-                "HTTP 仅供可信局域网或个人 VPN。密钥和请求内容会经过所选网络；启动不会修改防火墙。",
-            ));
-        if let Some(address) = &self.gateway_address {
-            let url = format!("http://{address}/v1");
-            view=view.child(div().font_family("Consolas").child(url.clone()))
-                .child(Button::new("copy-base-url").label("复制 Base URL").on_click(move|_,_,cx|cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))))
-                .child("Trae：选择 OpenAI 兼容接入，填写上面的 Base URL、本页创建的密钥，以及模型页返回的准确模型 ID。支持文本和函数工具；不支持的参数会明确报错。");
-        }
-        view
-    }
-    fn requests(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut view = div()
-            .v_flex()
-            .gap_3()
-            .child(self.title("本地持久化元数据，每秒更新。执行中的请求置顶；保留 7 天或最近 10,000 条已结束记录。"))
-            .child(div().h_flex().gap_2()
-                .child(Button::new("request-tab").label(format!("请求记录 ({})", self.request_count)).when(!self.show_failures, |b|b.primary())
-                    .on_click(cx.listener(|this,_,_,cx| {this.show_failures=false;cx.notify();})))
-                .child(Button::new("failure-tab").label(format!("失败异常 ({})", self.failure_count)).when(self.show_failures, |b|b.primary())
-                    .on_click(cx.listener(|this,_,_,cx| {this.show_failures=true;cx.notify();}))))
-            .child(div().text_sm().text_color(rgb(self.colors.muted)).child("详情包含起止时间、阶段、首个输出和上游活动；不保存聊天、代码、工具参数、回答或认证信息。长耗时本身不代表失败。"));
-        if self.log_write_failures > 0 {
-            view = view.child(div().text_color(rgb(self.colors.error)).child(format!(
-                "本次监听有 {} 次记录写入失败，部分记录可能不完整；请检查数据目录及磁盘。",
-                self.log_write_failures
-            )));
-        }
-        if let Some(record) = &self.selected_request {
-            let metadata = request_detail_lines(record, self.selected_failure.as_ref());
-            let detail_text = format!("请求详情\n{}", metadata.join("\n"));
-            view = view.child(
-                div()
-                    .v_flex()
-                    .min_w_0()
-                    .p_4()
-                    .gap_2()
-                    .bg(rgb(self.colors.surface))
-                    .rounded_lg()
-                    .child(
-                        div()
-                            .h_flex()
-                            .gap_2()
-                            .child("请求详情")
-                            .child(
-                                Button::new("copy-request-detail")
-                                    .label("复制明细")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            detail_text.clone(),
-                                        ));
-                                        this.status = "请求明细已复制".into();
-                                        this.error = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(Button::new("close-request-detail").label("收起").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.selected_request = None;
-                                    this.selected_failure = None;
-                                    this.requested_detail = None;
-                                    cx.notify();
-                                }),
-                            )),
-                    )
-                    .children(metadata.into_iter().map(|line| div().text_sm().child(line))),
-            );
-        }
-        if self.show_failures {
-            if self.failures.is_empty() {
-                view = view.child(self.panel(
-                    "暂无失败异常",
-                    "参数校验失败、上游异常、超时和取消会在这里单独保存，并关联请求 ID。",
-                ));
-            }
-            for failure in &self.failures {
-                let id = failure.request_id.clone();
-                view = view.child(
-                    div()
-                        .v_flex()
-                        .gap_2()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(self.colors.border))
-                        .child(
-                            div()
-                                .h_flex()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_color(rgb(self.colors.error))
-                                        .child(failure.code.clone()),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "failure-{}",
-                                        failure.request_id
-                                    )))
-                                    .label("关联请求详情")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.send(Command::RequestDetail(id.clone()), cx)
-                                    })),
-                                ),
-                        )
-                        .child(failure.message.clone())
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(self.colors.muted))
-                                .child(format!(
-                                    "{} · {} · 异常状态 {} · {}",
-                                    request_time(Some(failure.occurred_at)),
-                                    request_phase(&failure.phase),
-                                    failure.http_status,
-                                    failure.request_id
-                                )),
-                        ),
-                );
-            }
-        } else {
-            if self.records.is_empty() {
-                view = view.child(self.panel(
-                    "暂无请求记录",
-                    "客户端 API 请求进入时开始记录；旧版本只有内存记录，无法恢复历史正文或耗时。",
-                ));
-            }
-            for record in &self.records {
-                let id = record.id.clone();
-                let color = match record.outcome.as_str() {
-                    "completed" => self.colors.success,
-                    "failed" | "interrupted" => self.colors.error,
-                    _ => self.colors.warning,
-                };
-                view =
-                    view.child(
-                        div()
-                            .v_flex()
-                            .gap_2()
-                            .py_3()
-                            .border_b_1()
-                            .border_color(rgb(self.colors.border))
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(color))
-                                            .child(request_status(&record.outcome)),
-                                    )
-                                    .child(format!(
-                                        "{} · {:.2} 秒{}",
-                                        if record.model.is_empty() {
-                                            "未提供模型"
-                                        } else {
-                                            &record.model
-                                        },
-                                        record.elapsed_ms as f64 / 1000.,
-                                        if record.ended_at.is_none() && record.elapsed_ms >= 60000 {
-                                            " · 长时间执行"
-                                        } else {
-                                            ""
-                                        }
-                                    ))
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "detail-{}",
-                                            record.id
-                                        )))
-                                        .label("详情")
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.send(Command::RequestDetail(id.clone()), cx)
-                                            }),
-                                        ),
-                                    ),
-                            )
-                            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
-                                format!(
-                                    "{} {} · {}",
-                                    record.method,
-                                    record.route,
-                                    request_phase(&record.phase)
-                                ),
-                            ))
-                            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
-                                format!(
-                                "开始 {} · {} {}",
-                                request_time(Some(record.started_at)),
-                                if record.outcome == "interrupted" { "恢复确认" } else { "结束" },
-                                record
-                                    .ended_at
-                                    .map_or("执行中".into(), |t| request_time(Some(t)))
-                            ),
-                            )),
-                    );
-            }
-        }
-        let (page, total) = if self.show_failures {
-            (self.failure_page, self.failure_count)
-        } else {
-            (self.request_page, self.request_count)
-        };
-        let errors = self.show_failures;
-        view = view.child(
-            div()
-                .h_flex()
-                .gap_3()
-                .child(
-                    Button::new("history-prev")
-                        .label("上一页")
-                        .disabled(page == 0)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let (requests, failures) = if errors {
-                                (this.request_page, (this.failure_page - 1).max(0))
-                            } else {
-                                ((this.request_page - 1).max(0), this.failure_page)
-                            };
-                            this.send(Command::HistoryPage { requests, failures }, cx);
-                        })),
-                )
-                .child(format!(
-                    "第 {} / {} 页 · 每页 100 条",
-                    page + 1,
-                    ((total + 99) / 100).max(1)
-                ))
-                .child(
-                    Button::new("history-next")
-                        .label("下一页")
-                        .disabled((page + 1) * 100 >= total)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let (requests, failures) = if errors {
-                                (this.request_page, this.failure_page + 1)
-                            } else {
-                                (this.request_page + 1, this.failure_page)
-                            };
-                            this.send(Command::HistoryPage { requests, failures }, cx);
-                        })),
-                ),
-        );
-        view.into_any_element()
-    }
-    fn models(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut content = div().v_flex().gap_4().child(self.title("仅显示当前账号返回的模型，不预置虚构名称。"))
-            .child(Button::new("refresh-models").primary().label("读取模型目录").disabled(self.busy || !self.codex_connected)
-                .on_click(cx.listener(|this, _, _, cx| { this.busy = true; this.send(Command::RefreshModels, cx); })))
-            .child(self.panel("测试说明", "点击“测试文本”会发送固定短提示并使用账号额度。目录、每次测试结果和时间按账号保存到本地，重启后恢复。"))
-            .child(format!("目录获取时间：{}",format_time(self.models_checked_at)));
-        if self.models.is_empty() {
-            content = content.child(self.panel(
-                "尚无模型目录",
-                "先连接账号，再读取模型目录。目录失败时查看底部状态信息。",
-            ));
-        }
-        for model in &self.models {
-            let id = model.slug.clone();
-            content = content.child(
-                div()
-                    .h_flex()
-                    .justify_between()
-                    .gap_4()
-                    .p_4()
-                    .border_b_1()
-                    .border_color(rgb(self.colors.border))
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1()
-                            .min_w_0()
-                            .child(model.display_name.clone())
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(self.colors.muted))
-                                    .child(model.slug.clone()),
-                            )
-                            .child(
-                                div().text_sm().text_color(rgb(self.colors.muted)).child(
-                                    self.tests
-                                        .iter()
-                                        .find(|t| t.model_id == model.slug)
-                                        .map(|t| {
-                                            format!(
-                                                "最近测试：{} · {}",
-                                                test_status(&t.status),
-                                                format_time(t.finished_at.or(Some(t.started_at)))
-                                            )
-                                        })
-                                        .unwrap_or_else(|| "尚未测试".into()),
-                                ),
-                            ),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("test-{}", model.slug)))
-                            .label("测试文本")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.busy = true;
-                                this.test_result = None;
-                                this.send(Command::TestModel(id.clone()), cx);
-                            })),
-                    ),
-            );
-        }
-        if let Some(result) = &self.test_result {
-            content = content.child(self.panel("本次测试结果", result.clone()));
-        }
-        if !self.tests.is_empty() {
-            content = content.child(div().mt_4().text_lg().child("本地测试记录（最近 100 条）"));
-        }
-        for test in &self.tests {
-            let body = test
-                .text
-                .as_deref()
-                .or(test.error.as_deref())
-                .unwrap_or("测试进行中");
-            let preview = body.chars().take(4096).collect::<String>();
-            content = content.child(self.panel(
-                format!(
-                    "{} · {} · {}",
-                    test.model_id,
-                    test_status(&test.status),
-                    format_time(Some(test.started_at))
-                ),
-                format!(
-                    "{}{}\n结束：{} · 输入 {} / 输出 {} tokens",
-                    preview,
-                    if body.chars().count() > 4096 {
-                        "\n（界面显示前 4096 字，完整结果已保存在本地）"
-                    } else {
-                        ""
-                    },
-                    format_time(test.finished_at),
-                    test.input_tokens
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "未提供".into()),
-                    test.output_tokens
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "未提供".into())
-                ),
-            ));
-        }
-        content.into_any_element()
-    }
-
-    fn clients(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut content = div()
-            .v_flex()
-            .gap_4()
-            .child(self.title("为不同设备分别命名密钥。OAuth 凭据不会提供给客户端。"))
-            .child(self.network_controls(cx))
-            .child(
-                div()
-                    .h_flex()
-                    .gap_3()
-                    .child(Input::new(&self.key_name).w(px(320.)).disabled(self.busy))
-                    .child(
-                        Button::new("create-key")
-                            .primary()
-                            .label("创建密钥")
-                            .disabled(self.busy || self.new_key.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let label = this.key_name.read(cx).value().to_string();
-                                this.send(Command::CreateKey(label), cx);
-                            })),
-                    ),
-            );
-        if let Some((key, _)) = &self.new_key {
-            content =
-                content.child(
-                    div()
-                        .v_flex()
-                        .gap_3()
-                        .p_5()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(self.colors.warning))
-                        .child("密钥已加密保存 · 两分钟后隐藏，可随时再次查看或复制")
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_family("Consolas")
-                                .child(key.value.to_string()),
-                        )
-                        .child(
-                            div()
-                                .h_flex()
-                                .gap_3()
-                                .child(Button::new("copy-key").label("复制密钥").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        if let Some((key, _)) = &this.new_key {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                key.value.to_string(),
-                                            ));
-                                        }
-                                        this.status =
-                                            "已复制到系统剪贴板，请粘贴到自己的客户端".into();
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(Button::new("dismiss-key").label("隐藏密钥").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.new_key = None;
-                                        cx.notify();
-                                    }),
-                                )),
-                        ),
-                );
-        }
-        if self.keys.is_empty() {
-            content = content.child(self.panel(
-                "暂无客户端密钥",
-                "创建密钥后可供自己的设备或 Agent 接入；撤销后会删除，不再展示。",
-            ));
-        }
-        for key in &self.keys {
-            let id = key.id.clone();
-            let view_id = id.clone();
-            let copy_id = id.clone();
-            let confirming = self.revoke_id.as_ref() == Some(&id);
-            content = content.child(
-                div()
-                    .h_flex()
-                    .justify_between()
-                    .gap_4()
-                    .p_4()
-                    .border_b_1()
-                    .border_color(rgb(self.colors.border))
-                    .child(
-                        div().v_flex().gap_1().child(key.label.clone()).child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(self.colors.muted))
-                                .child(format!(
-                                    "{}…  ·  有效 · {}",
-                                    key.public_prefix,
-                                    if key.recoverable {
-                                        "可再次查看"
-                                    } else {
-                                        "旧密钥仅有摘要，无法还原"
-                                    }
-                                )),
-                        ),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("view-{id}")))
-                            .label("查看")
-                            .disabled(!key.recoverable)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send(
-                                    Command::RevealKey {
-                                        id: view_id.clone(),
-                                        copy: false,
-                                    },
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("copy-{id}")))
-                            .label("复制")
-                            .disabled(!key.recoverable)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send(
-                                    Command::RevealKey {
-                                        id: copy_id.clone(),
-                                        copy: true,
-                                    },
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("revoke-{id}")))
-                            .label(if confirming {
-                                "确认撤销并删除"
-                            } else {
-                                "撤销"
-                            })
-                            .disabled(self.busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.revoke_id.as_ref() == Some(&id) {
-                                    this.revoke_id = None;
-                                    this.send(Command::RevokeKey(id.clone()), cx);
-                                } else {
-                                    this.revoke_id = Some(id.clone());
-                                    cx.notify();
-                                }
-                            })),
-                    ),
-            );
-        }
-        content.into_any_element()
-    }
-    fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let appearance = div()
-            .v_flex()
-            .gap_3()
-            .p_5()
-            .rounded_lg()
-            .bg(rgb(self.colors.surface))
-            .border_1()
-            .border_color(rgb(self.colors.border))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("外观主题"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(self.colors.muted))
-                    .child("默认跟随电脑的应用主题；也可以固定使用白天或夜间模式。"),
-            )
-            .child(
-                div().h_flex().flex_wrap().gap_2().children(
-                    [
-                        (ThemePreference::System, "跟随电脑"),
-                        (ThemePreference::Light, "白天模式"),
-                        (ThemePreference::Dark, "夜间模式"),
-                    ]
-                    .into_iter()
-                    .map(|(preference, label)| {
-                        Button::new(SharedString::from(format!("theme-{}", preference.as_str())))
-                            .label(label)
-                            .when(preference == self.theme_preference, |button| {
-                                button.primary()
-                            })
-                            .disabled(!self.theme_loaded || self.theme_saving)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_theme_preference(preference, cx);
-                            }))
-                    }),
-                ),
-            )
-            .child(div().text_sm().text_color(rgb(self.colors.muted)).child(
-                if !self.theme_loaded {
-                    "正在读取主题设置…"
-                } else if self.theme_saving {
-                    "正在保存主题设置…"
-                } else if self.colors == theme::Palette::for_mode(ThemeMode::Dark) {
-                    "当前显示夜间模式 · 点击选项后生效，重启后保留选择。"
-                } else {
-                    "当前显示白天模式 · 点击选项后生效，重启后保留选择。"
-                },
-            ));
-        div().v_flex().gap_4()
-            .child(self.title("应用信息、主题与在线更新。"))
-            .child(appearance)
-            .child(self.online_updates(cx))
-            .child(self.panel("桌面与后台", "GPUI Kit 0.7.3 · Tokio · Axum 模型网关 · SQLite · 本机凭据保护 · Codex 设备码认证"))
-            .child(self.panel("窗口与网络", if cfg!(windows) { "打开应用时自动启动网关，沿用上次成功监听地址。关闭窗口默认收起到托盘，网关继续运行；点击托盘图标或再次打开应用可恢复窗口。右键托盘选择退出，或点击下方“退出应用”，将停止网关并结束应用。开机自启尚未实现。" } else { "打开应用时自动启动网关，沿用上次成功监听地址。需要已登录账号和有效客户端密钥；失败后可在客户端接入页重试。关闭窗口即停止网关并退出。托盘与开机自启尚未实现。" }))
-            .when_some(self.tray_notice.as_ref(), |column, notice| column.child(div().text_color(rgb(self.colors.error)).child(notice.clone())))
-            .child(Button::new("quit-application").label("退出应用").on_click(|_, _, cx| cx.quit()))
-            .child(self.panel("界面风格", "hashicorp · 白天与夜间配色、分层表面与明确状态。"))
-            .child(self.panel("本地数据", if cfg!(target_os="macos") { "默认 ~/.tiny-proxy。账号 Token 与可查看密钥采用 AES-256-GCM，加密密钥保存在本机钥匙串。SQLite 保存模型、测试与额度，不是全库加密；只复制数据库不能迁移凭据。额度每小时查询，退出暂停。" } else { "默认 %USERPROFILE%/.tiny-proxy。首次启动复制旧目录历史数据并保留原库。账号 Token 与可查看密钥使用 DPAPI，模型、测试与额度保存在 SQLite，不是全库加密。额度每小时查询，退出暂停。" }))
-            .into_any_element()
-    }
-}
-
-impl Render for Desktop {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.page {
-            0 => self.overview(cx),
-            1 => self.accounts(cx),
-            2 => self.models(cx),
-            3 => self.clients(cx),
-            4 => self.requests(cx),
-            _ => self.settings(cx),
-        };
-        div()
-            .h_flex()
-            .size_full()
-            .bg(rgb(self.colors.canvas))
-            .text_color(rgb(self.colors.ink))
-            .text_sm()
-            .child(
-                div()
-                    .v_flex()
-                    .w(px(208.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .border_r_1()
-                    .border_color(rgb(self.colors.border))
-                    .p_4()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::BOLD)
-                            .mt_3()
-                            .mb_1()
-                            .child("Tiny Proxy"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(self.colors.muted))
-                            .mb_6()
-                            .child("个人模型网关"),
-                    )
-                    .children(PAGES.iter().enumerate().map(|(index, label)| {
-                        Button::new(SharedString::from(format!("nav-{index}")))
-                            .label(*label)
-                            .w_full()
-                            .when(index == self.page, |button| button.primary())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.page = index;
-                                this.new_key = None;
-                                this.revoke_id = None;
-                                cx.notify();
-                            }))
-                    }))
-                    .child(div().flex_1())
-                    .when_some(self.update_sidebar_label(), |column, label| {
-                        column.child(Button::new("update-notice").label(label).w_full().on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.page = 5;
-                                this.update_notice = None;
-                                cx.notify();
-                            }),
-                        ))
-                    })
-                    .child(div().text_xs().text_color(rgb(self.colors.warning)).child(
-                        if self.gateway_address.is_some() {
-                            "网关运行中 · Codex"
-                        } else {
-                            "网关已停止 · Codex"
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(
-                        div()
-                            .id("page-scroll")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .p_8()
-                            .child(content),
-                    )
-                    .child(
-                        div()
-                            .px_6()
-                            .py_3()
-                            .border_t_1()
-                            .border_color(rgb(self.colors.border))
-                            .text_sm()
-                            .text_color(rgb(if self.error {
-                                self.colors.error
-                            } else {
-                                self.colors.muted
-                            }))
-                            .child(self.status.clone()),
-                    ),
-            )
     }
 }
 
@@ -1625,13 +899,14 @@ pub fn run(
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(1120.), px(760.)),
+                    size(px(1280.), px(820.)),
                     cx,
                 ))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Tiny Proxy · Codex 网关".into()),
                     ..Default::default()
                 }),
+                window_min_size: Some(size(px(960.), px(640.))),
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
@@ -1643,8 +918,48 @@ pub fn run(
 }
 
 #[cfg(test)]
+mod model_status_tests {
+    use super::test_status;
+
+    #[test]
+    fn labels_remain_valid_after_source_status_is_dropped() {
+        for (status, expected) in [
+            ("completed", "成功"),
+            ("failed", "失败"),
+            ("interrupted", "中断"),
+            ("running", "测试中"),
+            ("unrecognized", "未知"),
+        ] {
+            let label: &'static str = {
+                let stored_status = String::from(status);
+                test_status(&stored_status)
+            };
+            assert_eq!(label, expected);
+        }
+    }
+}
+
+#[cfg(test)]
 mod request_detail_tests {
     use super::{FailureRecord, Record, request_detail_lines};
+
+    #[test]
+    fn copied_drawer_keeps_timeline_warning_and_metadata_in_display_order() {
+        let mut record = record();
+        record.outcome = "failed".into();
+        record.stream = Some(true);
+        record.http_status = Some(200);
+        record.first_byte_at = Some(1_100);
+        record.first_output_at = None;
+        record.ended_at = Some(2_000);
+        let text = request_detail_lines(&record, None).join("\n");
+        let timeline = text.find("请求时间线").unwrap();
+        let warning = text.find("HTTP 200 不代表流已完整结束").unwrap();
+        let metadata = text.find("完整诊断明细").unwrap();
+        assert!(timeline < warning && warning < metadata);
+        assert!(!text[timeline..warning].contains("首个输出"));
+        assert!(text[metadata..].contains("首个输出：尚未收到"));
+    }
 
     fn record() -> Record {
         Record::new(
@@ -1743,6 +1058,7 @@ mod request_detail_tests {
         record.tool_count = Some(0);
         record.input_tokens = Some(100);
         record.output_tokens = Some(0);
+        record.cached_input_tokens = Some(80);
         let text = request_detail_lines(&record, None).join("\n");
         for expected in [
             "模型 model-fixture · 完成",
@@ -1752,6 +1068,7 @@ mod request_detail_tests {
             "HTTP：200 · 上游 HTTP：200",
             "流式：否 · 请求大小：512 字节 · 消息/输入项：2 · 工具定义：0",
             "输入/输出 tokens：100 / 0",
+            "缓存输入 tokens：80",
         ] {
             assert!(text.contains(expected), "missing detail: {expected}");
         }
@@ -1767,6 +1084,7 @@ mod request_detail_tests {
         record.stream = Some(true);
         let text = request_detail_lines(&record, None).join("\n");
         assert!(text.contains("结束：执行中 · 耗时 1.50 秒"));
+        assert!(text.contains("缓存输入 tokens：未提供"));
         assert!(text.contains("当前阶段：接收上游"));
         assert!(text.contains("HTTP：未返回"));
         assert!(text.contains("流式：是"));

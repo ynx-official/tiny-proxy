@@ -1,7 +1,7 @@
 # 模型 API 契约
 
 状态：Review  
-最后更新：2026-10-14
+最后更新：2026-10-15
 
 关联文档：[流式转换](streaming-protocol.md)、[规则](../01-requirements/business-rules.md)、[验收](../01-requirements/acceptance/mvp.md)
 
@@ -136,6 +136,10 @@ JSON 错误外壳为 error 对象，至少含 message、type、code，可含 par
 2026-10-13 按用户要求及 [B20](../01-requirements/business-rules.md) 改为撤销即删除：删除后的新请求统一返回 401 invalid_gateway_key，替代此前为已撤销记录返回 403；仍取消已登记的在途请求，验收 A09、A24、A45—A47。
 
 发出 HTTP 200/SSE 后不能改 HTTP 状态。Chat 用 data 中的 error 对象后关闭；Responses 按是否已建立 response 上下文发送合法 error/response.failed。具体消费者对流内错误的识别在兼容矩阵中验证，不能保证所有 Agent 都正确处理。
+
+### 流中断安全原因（2026-10-15）
+
+2026-10-15 流中断仍使用 `upstream_stream_interrupted`；`error.message` 和持久化异常改为对应分支的本地固定安全原因，区分传输、SSE/JSON、事件校验及缺失终态。两接口、JSON/SSE 共用，已提交 SSE 的 HTTP 200 不改写。分类范围、历史限制及尚未运行的验证见[流中断诊断](../05-operations/request-diagnostics.md#流中断诊断2026-10-15)。不回显上游事件名、正文、工具参数或原始错误。
 
 ### 本地参数校验诊断（2026-10-14）
 

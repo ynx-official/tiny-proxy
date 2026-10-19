@@ -72,6 +72,23 @@ async fn migration_records(pool: &SqlitePool) -> Vec<(i64, bool, Vec<u8>)> {
         .unwrap()
 }
 
+async fn assert_history_preserved_with_canonical_additions(
+    pool: &SqlitePool,
+    before: &[(i64, bool, Vec<u8>)],
+) {
+    let after = migration_records(pool).await;
+    assert_eq!(&after[..before.len()], before);
+    let source = fixture_migrator(i64::MAX, |_| false);
+    let last_version = before.last().map_or(0, |row| row.0);
+    let additions: Vec<_> = source.iter().filter(|m| m.version > last_version).collect();
+    assert_eq!(after.len(), before.len() + additions.len());
+    for (record, migration) in after[before.len()..].iter().zip(additions) {
+        assert_eq!(record.0, migration.version);
+        assert!(record.1);
+        assert_eq!(record.2, migration.checksum.as_ref());
+    }
+}
+
 async fn assert_saved_data(store: &Store, pool: &SqlitePool) {
     assert_eq!(store.host_id().await.unwrap(), "fixture-host");
     assert_eq!(store.gateway_bind().await.unwrap(), "127.0.0.1:9876");
@@ -106,7 +123,7 @@ async fn windows_checksums_reopen_without_rewriting_history_or_saved_data() {
     for _ in 0..2 {
         let store = Store::open(&path).await.unwrap();
         assert_saved_data(&store, &pool).await;
-        assert_eq!(migration_records(&pool).await, before);
+        assert_history_preserved_with_canonical_additions(&pool, &before).await;
         store.close().await;
     }
     pool.close().await;
@@ -120,7 +137,7 @@ async fn mixed_line_ending_history_reopens_and_stays_unchanged() {
     let before = migration_records(&pool).await;
     let store = Store::open(&path).await.unwrap();
     assert_saved_data(&store, &pool).await;
-    assert_eq!(migration_records(&pool).await, before);
+    assert_history_preserved_with_canonical_additions(&pool, &before).await;
     store.close().await;
     pool.close().await;
 }

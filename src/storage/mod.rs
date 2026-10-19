@@ -10,6 +10,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 mod desktop;
 mod migrations;
+mod overview;
 pub mod recovery;
 mod requests;
 mod updates;
