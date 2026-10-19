@@ -1,7 +1,7 @@
 # Tiny Proxy v1.2.0
 
 > 发布日期：2026-10-19
-> 状态：Approved
+> 状态：Approved（已发布）
 > 最后更新：2026-10-19
 > 发布测试策略：skip
 > 关联文档：[首页统计设计](../../02-design/overview-statistics.md)、[数据模型](../../03-architecture/data-model.md)、[桌面重构清单](../../04-quality/desktop-redesign-checklist.md)、[自定义端口清单](../../04-quality/custom-port-checklist.md)
@@ -36,7 +36,11 @@
 
 ## 验证结果
 
-本版 Rust 单元/集成测试和 Python 发布工具测试按用户要求跳过。`cargo +1.96.0 fmt --all -- --check` 通过；`cargo +1.96.0 clippy --lib --bin tiny-proxy --locked -- -D warnings` 通过。跳过测试时 Clippy 覆盖 library 与桌面 binary 生产目标；常规版本仍检查所有目标。`cargo build --locked --release --target x86_64-pc-windows-msvc --bin tiny-proxy` 成功。EXE ProductVersion/FileVersion 均为 1.2.0；Windows 便携 ZIP 与安装 EXE 已生成，安装器编译成功。`python scripts/release_notes.py --check-current` 通过。Python 发布工具测试、macOS arm64 构建、macOS 两包、最终清单和公开文件校验由标签工作流执行，结果待回填。测试及真实客户端、全页面窗口交互、真实用户数据库迁移和应用内更新往返未运行。
+本版 Rust 单元/集成测试和 Python 发布工具测试按用户要求跳过。`cargo +1.96.0 fmt --all -- --check` 通过；`cargo +1.96.0 clippy --lib --bin tiny-proxy --locked -- -D warnings` 通过。跳过测试时 Clippy 覆盖 library 与桌面 binary 生产目标；常规版本仍检查所有目标。`cargo build --locked --release --target x86_64-pc-windows-msvc --bin tiny-proxy` 成功。EXE ProductVersion/FileVersion 均为 1.2.0；Windows 便携 ZIP 与安装 EXE 已生成，安装器编译成功。`python scripts/release_notes.py --tag v1.2.0` 通过。
+
+[标签 Native checks](https://github.com/ynx-official/tiny-proxy/actions/runs/39212212113) 的双平台格式、生产目标 Clippy 与 release 构建成功，测试步骤跳过。[正式 Release 工作流](https://github.com/ynx-official/tiny-proxy/actions/runs/39212212066) 的资料校验、Windows x64/macOS arm64 构建、四包打包、清单生成和上传成功；发布工具测试跳过。v1.2.0 于 2026-10-19 15:04:38（北京时间）公开发布，非 Draft/Prerelease。
+
+已下载并逐一核对公开六个文件的名称、大小和 SHA-256 与 GitHub 资产摘要一致；清单为 v1.2.0、包含四个唯一应用包。Windows 便携 EXE 的 ProductVersion/FileVersion 和安装 EXE 的 ProductVersion 均为 1.2.0；macOS 便携包的 plist 版本为 1.2.0，包内可执行文件存在。对应实际文件及哈希见公开 [Release](https://github.com/ynx-official/tiny-proxy/releases/tag/v1.2.0)。测试及真实客户端、全页面窗口交互、真实用户数据库迁移和应用内更新往返未运行，未替换本机正在运行的程序。
 
 ## 变更依据
 
